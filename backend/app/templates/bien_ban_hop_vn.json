@@ -1,0 +1,77 @@
+{
+    "name": "Biên bản họp (Vietnamese)",
+    "description": "Template biên bản họp được tối ưu hoàn toàn cho tiếng Việt. Phù hợp với chuẩn biên bản họp tại Việt Nam với luồng thảo luận chi tiết và công việc được giao rõ ràng.",
+    "sections": [
+        {
+            "title": "Thông tin cuộc họp",
+            "instruction": "Ngày tháng năm họp, giờ bắt đầu và kết thúc, địa điểm (trực tiếp/online), người chủ trì. Ví dụ: 'Ngày 18/12/2024, 14:00-15:30, Phòng họp A, Chủ trì: Anh Nguyễn Văn A'",
+            "format": "paragraph"
+        },
+        {
+            "title": "Thành phần tham dự",
+            "instruction": "Danh sách tất cả người tham gia họp với vai trò/chức danh. QUAN TRỌNG: Sử dụng thông tin speaker labels từ transcript để nhận diện người nói (ví dụ: SPEAKER_00, SPEAKER_01). Ghép speaker labels với tên được nhắc đến trong cuộc họp. Nhận dạng tên người Việt chính xác với 'Ông/Bà/Anh/Chị + Họ tên đầy đủ'. Ví dụ: 'SPEAKER_00: Anh Nguyễn Văn A - Trưởng phòng Kỹ thuật'. Nếu transcript chỉ gọi là 'anh A' hoặc 'chị B', ghi lại đúng như vậy cùng với speaker label.",
+            "format": "list",
+            "item_format": "| **Speaker Label** | **Họ tên** | **Vai trò/Chức danh** |\n| --- | --- | --- |"
+        },
+        {
+            "title": "Thành phần vắng mặt",
+            "instruction": "Người được mời nhưng vắng mặt (nếu có đề cập trong transcript). Ghi rõ lý do nếu biết. Nếu không có thông tin, ghi 'Không có'",
+            "format": "list"
+        },
+        {
+            "title": "Mục đích cuộc họp",
+            "instruction": "Lý do tổ chức cuộc họp này, mục tiêu cần đạt được. Trích xuất từ phần mở đầu hoặc giới thiệu của người chủ trì. Ví dụ: 'Họp để bàn về tiến độ dự án X', 'Thảo luận kế hoạch quý IV'",
+            "format": "paragraph"
+        },
+        {
+            "title": "Tóm tắt nội dung",
+            "instruction": "Tóm tắt toàn bộ cuộc họp trong 1-2 đoạn văn ngắn gọn. Bao gồm các điểm chính được thảo luận, quyết định quan trọng, và kết quả đạt được. Đây là executive summary giúp người đọc nắm bắt nhanh nội dung họp.",
+            "format": "paragraph"
+        },
+        {
+            "title": "Nội dung chi tiết",
+            "instruction": "Mô tả chi tiết luồng thảo luận theo trình tự thời gian. QUAN TRỌNG: Luôn ghi rõ speaker label (SPEAKER_XX) trước tên người nói để dễ tra cứu. Chia thành các vấn đề/chủ đề được bàn, ai nói gì, quan điểm ra sao. Sử dụng format: '**Vấn đề 1: [Tên vấn đề]**' rồi mô tả chi tiết. Thể hiện rõ ai đưa ra ý kiến gì, ai đồng ý/phản đối. Ví dụ: '[SPEAKER_00] Anh A đề xuất...', '[SPEAKER_01] Chị B cho rằng...', '[SPEAKER_02] Theo ý kiến của anh C...'. Khi reference đến phát biểu cụ thể, thêm timestamp trong ngoặc [MM:SS] để có thể click jump đến đoạn transcript tương ứng.",
+            "format": "paragraph"
+        },
+        {
+            "title": "Ý kiến đóng góp",
+            "instruction": "Các ý kiến quan trọng của từng thành viên trong cuộc họp. QUAN TRỌNG: Ghi rõ speaker label để dễ nhận diện. Tóm tắt quan điểm chính của từng người. Chỉ ghi những ý kiến có giá trị, không lặp lại nội dung đã có ở phần 'Nội dung chi tiết'. Thêm timestamp [MM:SS] để có thể click jump đến đoạn transcript gốc.",
+            "format": "list",
+            "item_format": "| **Speaker Label** | **Người đóng góp** | **Nội dung ý kiến** | **Tham chiếu** |\n| --- | --- | --- | --- |"
+        },
+        {
+            "title": "Các quyết định",
+            "instruction": "Tất cả quyết định đã được thống nhất trong cuộc họp. Tìm các từ khóa: 'đồng ý', 'thống nhất', 'quyết định', 'thông qua', 'chấp thuận'. QUAN TRỌNG: Ghi rõ speaker label của người đưa ra/phê duyệt quyết định. Ghi rõ quyết định gì, ai quyết định, căn cứ gì. Ví dụ: '[SPEAKER_00] Anh A thống nhất tăng ngân sách thêm 50 triệu cho dự án Y'. Thêm timestamp [MM:SS] trong cột tham chiếu.",
+            "format": "list",
+            "item_format": "| **Quyết định** | **Speaker Label** | **Người quyết định** | **Căn cứ/Lý do** | **Tham chiếu [MM:SS]** |\n| --- | --- | --- | --- | --- |"
+        },
+        {
+            "title": "Công việc được giao",
+            "instruction": "Danh sách tất cả công việc/nhiệm vụ được phân công. Tìm các cụm từ: 'anh/chị/em [Tên] sẽ làm/phụ trách/theo dõi/hoàn thành', 'giao cho...', 'ai đó chịu trách nhiệm...'. QUAN TRỌNG: Bắt buộc ghi speaker label của người được giao việc và người giao việc để dễ tra cứu và accountability. Ghi rõ người làm, nội dung công việc, deadline (nếu có), mức độ ưu tiên (nếu có). Luôn thêm thông tin tham chiếu về đoạn transcript và thời gian [MM:SS] để dễ dàng kiểm tra lại bằng cách click vào.",
+            "format": "list",
+            "item_format": "| **Speaker Label** | **Người phụ trách** | **Nội dung công việc** | **Người giao việc** | **Thời hạn** | **Mức độ ưu tiên** | **Tham chiếu [MM:SS]** |\n| --- | --- | --- | --- | --- | --- | --- |"
+        },
+        {
+            "title": "Vấn đề cần giải quyết",
+            "instruction": "Các vấn đề, khó khăn, trở ngại được nêu ra nhưng chưa có giải pháp cụ thể. Hoặc những issue cần theo dõi tiếp. Ví dụ: 'Thiếu nhân sự cho bộ phận marketing', 'Chưa rõ lịch triển khai sản phẩm'",
+            "format": "list",
+            "item_format": "| **Vấn đề** | **Mức độ nghiêm trọng** | **Đề xuất giải pháp (nếu có)** |\n| --- | --- | --- |"
+        },
+        {
+            "title": "Rủi ro và giải pháp",
+            "instruction": "Các rủi ro tiềm ẩn được nhắc đến và giải pháp đề xuất. Tìm từ khóa: 'rủi ro', 'nguy cơ', 'có thể gặp vấn đề', 'lo ngại', 'chắc chắn sẽ...'. Ghi rõ rủi ro gì, mức độ tác động, giải pháp đề xuất, ai chịu trách nhiệm theo dõi.",
+            "format": "list",
+            "item_format": "| **Rủi ro** | **Mức độ tác động** | **Giải pháp đề xuất** | **Người theo dõi** |\n| --- | --- | --- | --- |"
+        },
+        {
+            "title": "Kết luận",
+            "instruction": "Phần kết thúc cuộc họp được tóm tắt bởi người chủ trì. Thông thường là nhắc lại các điểm chính, quyết định quan trọng, và next steps. Nếu không có phần kết luận rõ ràng, tóm tắt tổng quan lại toàn bộ cuộc họp.",
+            "format": "paragraph"
+        },
+        {
+            "title": "Cuộc họp tiếp theo",
+            "instruction": "Thông tin về cuộc họp kế tiếp (nếu có đề cập): ngày, giờ, địa điểm, chủ đề. Ví dụ: 'Cuộc họp tiếp theo vào thứ Sáu tuần sau, 9:00 AM, để review tiến độ'. Nếu không có thông tin, ghi 'Chưa xác định'",
+            "format": "string"
+        }
+    ]
+}
