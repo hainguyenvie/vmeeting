@@ -30,6 +30,42 @@ interface MeetingDetailsResponse {
 export default function MeetingDetailPage({ params }: { params: { id: string } }) {
     const router = useRouter();
     const meetingId = params.id;
+    // ... rest of state ...
+
+    // NEW: Global click handler for citation links
+    useEffect(() => {
+        const handleCitationClick = (e: MouseEvent) => {
+            const target = e.target as HTMLElement;
+            // Traverse up to find if click was inside an anchor tag
+            const anchor = target.closest('a');
+
+            if (anchor && anchor.hash && anchor.hash.startsWith('#transcript-')) {
+                e.preventDefault();
+                const targetId = anchor.hash.substring(1); // remove '#'
+                console.log('🔗 Intercepted citation click:', targetId);
+
+                const element = document.getElementById(targetId);
+                if (element) {
+                    // 1. Scroll into view
+                    element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+                    // 2. Dispatch custom event to highlight the transcript
+                    const event = new CustomEvent('highlightTranscript', { detail: targetId });
+                    window.dispatchEvent(event);
+                } else {
+                    console.warn('⚠️ Target transcript element not found:', targetId);
+                }
+            }
+        };
+
+        // Add listener to the document
+        document.addEventListener('click', handleCitationClick);
+
+        return () => {
+            document.removeEventListener('click', handleCitationClick);
+        };
+    }, []);
+
     const { setCurrentMeeting, refetchMeetings, serverAddress } = useSidebar();
     const [meetingDetails, setMeetingDetails] = useState<MeetingDetailsResponse | null>(null);
     const [meetingSummary, setMeetingSummary] = useState<Summary | null>(null);

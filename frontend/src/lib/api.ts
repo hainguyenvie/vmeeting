@@ -12,7 +12,8 @@ export const apiClient = axios.create({
     headers: {
         'Content-Type': 'application/json',
     },
-    timeout: 30000,
+    // Increased timeout for long-running AI tasks (Reframe pipeline)
+    timeout: 120000,
 });
 
 // Types
@@ -102,6 +103,28 @@ export const meetingsAPI = {
     getTranscripts: async (meetingId: string): Promise<Transcript[]> => {
         const response = await apiClient.get(`/get-transcripts/${meetingId}`);
         return response.data;
+    },
+
+    /**
+     * Rename a speaker
+     */
+    renameSpeaker: async (meetingId: string, oldName: string, newName: string): Promise<void> => {
+        await apiClient.post('/rename-speaker', {
+            meeting_id: meetingId,
+            old_name: oldName,
+            new_name: newName
+        });
+    },
+
+    /**
+     * Merge speakers (delete one and assign segments to another)
+     */
+    mergeSpeakers: async (meetingId: string, fromSpeaker: string, toSpeaker: string): Promise<void> => {
+        await apiClient.post('/merge-speakers', {
+            meeting_id: meetingId,
+            from_speaker: fromSpeaker,
+            to_speaker: toSpeaker
+        });
     },
 };
 
@@ -223,6 +246,11 @@ export const summaryAPI = {
         api_key?: string;
         custom_prompt?: string;
         meeting_id?: string;
+        metadata?: {
+            meeting_title?: string;
+            date?: string;
+            participants?: string[];
+        };
     }): Promise<{ summary: any; raw_summary?: string; model: string; markdown?: string; summary_json?: any[] }> => {
         const response = await apiClient.post('/api/summary/generate', data);
         return response.data;

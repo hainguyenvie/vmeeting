@@ -1,11 +1,13 @@
 "use client";
 
-import { useState } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Transcript } from '@/types';
 import { RecordingControls } from '@/components/web/RecordingControls';
 import { LiveTranscriptPanel } from '@/components/web/LiveTranscriptPanel';
 import { FileContextUpload } from './FileContextUpload';
-import { ChevronDown, ChevronUp } from 'lucide-react';
+import { ChevronDown, ChevronUp, Edit2, Trash2, X, Check } from 'lucide-react';
+import { meetingsAPI } from '@/lib/api';
+import { toast } from 'sonner';
 
 interface EnhancedTranscriptPanelProps {
     meetingId: string;
@@ -31,6 +33,53 @@ export function EnhancedTranscriptPanel({
     const [transcriptsExpanded, setTranscriptsExpanded] = useState(true);
     const [contextExpanded, setContextExpanded] = useState(false);
 
+    // Speaker Management State
+    const [renameState, setRenameState] = useState<{ isOpen: boolean; oldName: string; newName: string }>({
+        isOpen: false, oldName: '', newName: ''
+    });
+    const [mergeState, setMergeState] = useState<{ isOpen: boolean; fromSpeaker: string; toSpeaker: string }>({
+        isOpen: false, fromSpeaker: '', toSpeaker: ''
+    });
+
+    // Unique speakers for merge dropdown
+    const uniqueSpeakers = Array.from(new Set(transcripts.map(t => t.speaker))).filter(Boolean) as string[];
+
+    const handleRenameClick = (speaker: string) => {
+        setRenameState({ isOpen: true, oldName: speaker, newName: speaker });
+    };
+
+    const handleDeleteClick = (speaker: string) => {
+        setMergeState({ isOpen: true, fromSpeaker: speaker, toSpeaker: '' });
+    };
+
+    const confirmRename = async () => {
+        try {
+            await meetingsAPI.renameSpeaker(meetingId, renameState.oldName, renameState.newName);
+            toast.success('Speaker renamed successfully');
+            setRenameState({ ...renameState, isOpen: false });
+            if (onRefreshTranscripts) await onRefreshTranscripts();
+        } catch (error) {
+            console.error(error);
+            toast.error('Failed to rename speaker');
+        }
+    };
+
+    const confirmMerge = async () => {
+        if (!mergeState.toSpeaker) {
+            toast.error('Please select a target speaker');
+            return;
+        }
+        try {
+            await meetingsAPI.mergeSpeakers(meetingId, mergeState.fromSpeaker, mergeState.toSpeaker);
+            toast.success('Speaker deleted and segments merged');
+            setMergeState({ ...mergeState, isOpen: false });
+            if (onRefreshTranscripts) await onRefreshTranscripts();
+        } catch (error) {
+            console.error(error);
+            toast.error('Failed to merge speaker');
+        }
+    };
+
     const handleRecordingStateChange = (recording: boolean) => {
         setIsRecording(recording);
         onRecordingStateChange?.(recording);
@@ -45,29 +94,47 @@ export function EnhancedTranscriptPanel({
         }
     };
 
-    const handleNewTranscript = (newTranscript: any) => {
-        console.log('⚡ New transcript received:', newTranscript);
+    // Use useCallback to prevent LiveTranscriptPanel re-renders / WS reconnects
+    const handleNewTranscript = useCallback((newTranscript: any) => {
+        // @ts-ignore - bypassing strict prop type to allow functional update if supported by parent state
+        onTranscriptUpdate((prevTranscripts: any) => {
+            // Check if prevTranscripts is actually an array (it should be)
+            const list = Array.isArray(prevTranscripts) ? prevTranscripts : [];
 
-        const isDuplicate = transcripts.some(
-            t => t.timestamp === newTranscript.timestamp &&
-                (t.text || (t as any).transcript) === (newTranscript.text || newTranscript.transcript)
-        );
+            const isDuplicate = list.some(
+                (t: any) => t.timestamp === newTranscript.timestamp &&
+                    (t.text || t.transcript) === (newTranscript.text || newTranscript.transcript)
+            );
 
-        if (!isDuplicate) {
-            const updatedTranscripts = [...transcripts, {
-                id: `live-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-                meeting_id: newTranscript.meeting_id || meetingId,
-                text: newTranscript.text || newTranscript.transcript || '',
-                timestamp: newTranscript.timestamp,
-                speaker: newTranscript.speaker,
-                audio_start_time: newTranscript.audio_start_time,
-                audio_end_time: newTranscript.audio_end_time,
-                is_provisional: false
-            }];
+            if (!isDuplicate) {
+                return [...list, {
+                    id: `live-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+                    meeting_id: newTranscript.meeting_id || meetingId,
+                    text: newTranscript.text || newTranscript.transcript || '',
+                    timestamp: newTranscript.timestamp,
+                    speaker: newTranscript.speaker,
+                    audio_start_time: newTranscript.audio_start_time,
+                    audio_end_time: newTranscript.audio_end_time,
+                    is_provisional: false
+                }];
+            }
+            return list;
+        });
+    }, [meetingId, onTranscriptUpdate]);
 
-            onTranscriptUpdate(updatedTranscripts);
+    // Auto-refresh when recording stops to get full final transcripts
+    useEffect(() => {
+        if (!isRecording) {
+            // Wait for backend pipeline to finish (it sends 'stop' then processes)
+            const timer = setTimeout(() => {
+                console.log("🔄 Auto-refreshing transcripts after recording...");
+                if (onRefreshTranscripts) {
+                    onRefreshTranscripts();
+                }
+            }, 2000); // 2s delay to be safe
+            return () => clearTimeout(timer);
         }
-    };
+    }, [isRecording, onRefreshTranscripts]);
 
     const getSpeakerColor = (speaker?: string) => {
         if (!speaker) return 'bg-gray-400';
@@ -108,7 +175,76 @@ export function EnhancedTranscriptPanel({
     };
 
     return (
-        <div className="flex flex-col w-2/3 border-r border-gray-200 bg-white relative h-full">
+        <div className="flex flex-col w-1/2 border-r border-gray-200 bg-white relative h-full">
+            {/* Dialogs */}
+            {renameState.isOpen && (
+                <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+                    <div className="bg-white p-4 rounded-lg shadow-xl w-80">
+                        <h3 className="text-lg font-semibold mb-3">Rename Speaker</h3>
+                        <input
+                            type="text"
+                            value={renameState.newName}
+                            onChange={(e) => setRenameState({ ...renameState, newName: e.target.value })}
+                            className="w-full border rounded p-2 mb-4"
+                            autoFocus
+                        />
+                        <div className="flex justify-end gap-2">
+                            <button
+                                onClick={() => setRenameState({ ...renameState, isOpen: false })}
+                                className="px-3 py-1 text-gray-600 hover:bg-gray-100 rounded"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={confirmRename}
+                                className="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700"
+                            >
+                                Save
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {mergeState.isOpen && (
+                <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+                    <div className="bg-white p-4 rounded-lg shadow-xl w-80">
+                        <h3 className="text-lg font-semibold mb-1">Delete Speaker</h3>
+                        <p className="text-sm text-gray-500 mb-3">
+                            Merge segments from <b>{mergeState.fromSpeaker}</b> into:
+                        </p>
+                        <select
+                            value={mergeState.toSpeaker}
+                            onChange={(e) => setMergeState({ ...mergeState, toSpeaker: e.target.value })}
+                            className="w-full border rounded p-2 mb-4"
+                        >
+                            <option value="">Select a speaker...</option>
+                            {uniqueSpeakers
+                                .filter(s => s !== mergeState.fromSpeaker)
+                                .map(s => (
+                                    <option key={s} value={s}>{s}</option>
+                                ))
+                            }
+                        </select>
+                        <div className="flex justify-end gap-2">
+                            <button
+                                onClick={() => setMergeState({ ...mergeState, isOpen: false })}
+                                className="px-3 py-1 text-gray-600 hover:bg-gray-100 rounded"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={confirmMerge}
+                                disabled={!mergeState.toSpeaker}
+                                className="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50"
+                            >
+                                Merge & Delete
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Scrollable Content Area */}
             <div className="flex-1 overflow-y-auto" style={{ paddingBottom: contextExpanded ? '240px' : '60px' }}>
 
@@ -185,14 +321,35 @@ export function EnhancedTranscriptPanel({
                                         return (
                                             <div key={transcript.id || index} className="p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors" data-time={transcript.audio_start_time}>
                                                 <div className="flex items-start gap-3">
-                                                    {/* Speaker Avatar */}
-                                                    <div className="flex-shrink-0 flex flex-col items-center gap-1">
+                                                    {/* Speaker Avatar - Fixed width to prevent misalignment */}
+                                                    <div className="flex-shrink-0 flex flex-col items-center gap-1 w-24 group/speaker">
                                                         <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white font-bold text-xs shadow-sm ${getSpeakerColor(transcript.speaker)}`}>
-                                                            {transcript.speaker ? transcript.speaker.slice(-2).toUpperCase() : '??'}
+                                                            {transcript.speaker ? transcript.speaker.slice(0, 2).toUpperCase() : '??'}
                                                         </div>
-                                                        <span className="text-xs font-medium text-gray-600 text-center">
-                                                            {transcript.speaker || 'Unknown'}
-                                                        </span>
+                                                        <div className="flex items-center gap-1">
+                                                            <span className="text-[10px] font-medium text-gray-600 text-center leading-tight break-words max-w-[60px]">
+                                                                {transcript.speaker || 'Unknown'}
+                                                            </span>
+                                                            {/* Action Buttons */}
+                                                            {transcript.speaker && (
+                                                                <div className="hidden group-hover/speaker:flex flex-col gap-0.5 ml-1">
+                                                                    <button
+                                                                        onClick={(e) => { e.stopPropagation(); handleRenameClick(transcript.speaker!); }}
+                                                                        className="p-0.5 text-gray-400 hover:text-blue-600 rounded bg-white/80 shadow-sm"
+                                                                        title="Rename"
+                                                                    >
+                                                                        <Edit2 className="w-3 h-3" />
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={(e) => { e.stopPropagation(); handleDeleteClick(transcript.speaker!); }}
+                                                                        className="p-0.5 text-gray-400 hover:text-red-600 rounded bg-white/80 shadow-sm"
+                                                                        title="Delete/Merge"
+                                                                    >
+                                                                        <Trash2 className="w-3 h-3" />
+                                                                    </button>
+                                                                </div>
+                                                            )}
+                                                        </div>
                                                     </div>
 
                                                     {/* Content */}

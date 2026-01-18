@@ -138,26 +138,48 @@ async def process_audio_chunk(audio_data: bytes, meeting_id: str, diarize: bool 
         traceback.print_exc()
         return None
 
+
+# Calculate RMS for VAD
+import numpy as np
+def calculate_rms(audio_chunk: bytes) -> float:
+    """Calculate Root Mean Square (RMS) amplitude of audio chunk"""
+    # Assuming 16-bit PCM (2 bytes per sample)
+    if len(audio_chunk) == 0: return 0.0
+    arr = np.frombuffer(audio_chunk, dtype=np.int16)
+    if len(arr) == 0: return 0.0  # Safety check
+    mean_val = np.mean(arr**2)
+    if mean_val <= 0: return 0.0  # Prevent sqrt of negative
+    return np.sqrt(mean_val)
+
 @router.websocket("/ws/audio/{meeting_id}")
 async def websocket_audio_endpoint(websocket: WebSocket, meeting_id: str):
     """
-    WebSocket endpoint with 'Sliding Window Preview' & 'Periodic Final'.
+    WebSocket endpoint with VAD-triggered Live Transcription.
     """
     await manager.connect(websocket, meeting_id)
     
     # Configuration
-    SLIDING_WINDOW_SIZE = 16000 * 2 * 6  # 6 seconds sliding window for context
-    FINAL_MIN_DURATION = 10.0            # 10s accumulation for final
+    SAMPLE_RATE = 16000
+    BYTES_PER_SAMPLE = 2 # 16-bit
     
-    # Buffers
-    draft_sliding_buffer = bytearray()   # Rolling context for preview
-    final_buffer = bytearray()           # accumulated audio for final
+    # VAD Constants - TUNED for continuous speech
+    SILENCE_THRESHOLD = 300
+    SILENCE_DURATION = 2.0
+    MIN_PHRASE_DURATION = 2.0
+    MAX_PHRASE_DURATION = 20.0 
+    COOLDOWN_DURATION = 0.5
+    
+    # Buffers & State
+    final_buffer = bytearray()      # Full meeting audio (for DB save on stop)
+    phrase_buffer = bytearray()     # Current active phrase (for live transcript)
+    
+    silence_start_time = None
+    last_process_time = datetime.now()
+    is_processing = False  # Flag to prevent duplicate processing
     
     try:
         while True:
-            # print("DEBUG: Waiting for message...") 
             data = await websocket.receive()
-            # print(f"DEBUG: Received message keys: {data.keys()}")
             
             if 'text' in data:
                  message = json.loads(data['text'])
@@ -165,6 +187,10 @@ async def websocket_audio_endpoint(websocket: WebSocket, meeting_id: str):
                  print(f"📩 Received TEXT message: {msg_type}")
                  
                  if msg_type == 'stop':
+                     # Process any remaining phrase
+                     if len(phrase_buffer) > 0:
+                         asyncio.create_task(process_live_phrase(bytes(phrase_buffer), meeting_id))
+                     
                      # Final flush (FULL PIPELINE)
                      if len(final_buffer) > 0:
                          await manager.broadcast(meeting_id, {'type': 'status', 'status': 'processing'})
@@ -175,26 +201,151 @@ async def websocket_audio_endpoint(websocket: WebSocket, meeting_id: str):
 
             elif 'bytes' in data:
                 audio_chunk = data['bytes']
+                result = None
                 
                 # 1. Feed buffers
                 final_buffer.extend(audio_chunk)
+                phrase_buffer.extend(audio_chunk)
                 
-                # NO REAL-TIME PROCESSING AS REQUESTED
-                # Just accumulate.
+                # 2. VAD & Trigger Logic
+                rms = calculate_rms(audio_chunk)
+                now = datetime.now()
                 
-                # Optional: Send "Recording..." status update every 5 seconds?
-                # For now, silent.
+                is_silence = rms < SILENCE_THRESHOLD
+                
+                # Calculate durations
+                phrase_duration = len(phrase_buffer) / (SAMPLE_RATE * BYTES_PER_SAMPLE)
+                time_since_last_process = (now - last_process_time).total_seconds()
+                
+                if is_silence:
+                    if silence_start_time is None:
+                        silence_start_time = now
+                    else:
+                        silence_duration = (now - silence_start_time).total_seconds()
+                        
+                        # Trigger condition: Sufficient silence AND enough audio AND not in cooldown
+                        should_trigger = (
+                            silence_duration > SILENCE_DURATION and 
+                            phrase_duration > MIN_PHRASE_DURATION and
+                            time_since_last_process > COOLDOWN_DURATION and
+                            not is_processing
+                        )
+                        
+                        if should_trigger:
+                             print(f"🎤 VAD Trigger: Silence={silence_duration:.2f}s, Phrase={phrase_duration:.2f}s")
+                             
+                             # Set flag to prevent duplicate
+                             is_processing = True
+                             
+                             # Copy buffer to process
+                             audio_to_process = bytes(phrase_buffer)
+                             
+                             # --- OVERLAP STRATEGY ---
+                             # Keep last 1.0s of audio (usually silence) as context for next phrase
+                             # This fixes "missing start of next sentence" by giving Whisper context
+                             overlap_duration = 1.0 
+                             overlap_bytes = int(SAMPLE_RATE * BYTES_PER_SAMPLE * overlap_duration)
+                             
+                             if len(phrase_buffer) > overlap_bytes:
+                                 phrase_buffer = phrase_buffer[-overlap_bytes:]
+                             else:
+                                 # If buffer is short (unlikely due to duration check), keep all
+                                 # But actually we want to reset if it's just silence? 
+                                 # No, context is good.
+                                 pass 
+                                 
+                             # Reset only timing, keep phrase_buffer with overlap
+                             silence_start_time = None
+                             last_process_time = now
+                             
+                             # Async Process with callback to reset flag
+                             async def process_with_reset():
+                                 await process_live_phrase(audio_to_process, meeting_id)
+                                 nonlocal is_processing
+                                 is_processing = False
+                             
+                             asyncio.create_task(process_with_reset())
+                             
+                else:
+                    # Voice detected, reset silence timer
+                    silence_start_time = None
+                    
+                # 3. Force Trigger (Safety Net) - only if enough time has passed
+                if phrase_duration > MAX_PHRASE_DURATION and time_since_last_process > COOLDOWN_DURATION and not is_processing:
+                     print(f"⏰ Force Trigger: Max phrase duration reached ({phrase_duration:.2f}s)")
+                     is_processing = True
+                     audio_to_process = bytes(phrase_buffer)
+                     
+                     # Keep overlap even on force trigger to avoid cutting words
+                     overlap_bytes = int(SAMPLE_RATE * BYTES_PER_SAMPLE * 1.0)
+                     if len(phrase_buffer) > overlap_bytes:
+                         phrase_buffer = phrase_buffer[-overlap_bytes:]
+                     else:
+                         phrase_buffer = bytearray() # Should not happen on Max Duration
+                         
+                     silence_start_time = None
+                     last_process_time = now
+                     
+                     async def process_with_reset():
+                         await process_live_phrase(audio_to_process, meeting_id)
+                         nonlocal is_processing
+                         is_processing = False
+                     
+                     asyncio.create_task(process_with_reset())
 
     except WebSocketDisconnect:
         print(f"🔌 WebSocket disconnected for meeting: {meeting_id}")
         manager.disconnect(websocket, meeting_id)
     except Exception as e:
         print(f"❌ WebSocket error: {e}")
+        import traceback
+        traceback.print_exc()
         manager.disconnect(websocket, meeting_id)
         
     finally:
-        # Debug buffer size on exit
         print(f"🏁 WebSocket loop exited. Final Buffer Size: {len(final_buffer)} bytes")
+
+async def process_live_phrase(audio_data: bytes, meeting_id: str):
+    """
+    Process a specific phrase for live display.
+    Broadcasting 'live_transcript' event.
+    """
+    # WRAP IN WAV HEADER (Critical fix for raw PCM)
+    wav_data = create_wav_bytes(audio_data)
+    
+    # Disable diarization for live transcripts as requested
+    result = await process_audio_chunk(wav_data, meeting_id, diarize=False)
+    
+    if result and result.get('transcript'):
+        text = result['transcript'].strip()
+        
+        # --- TRASH FILTER for Live Transcripts ---
+        text_upper = text.upper()
+        blacklist = ["Ừ", "À", "ẬM", "Ờ", "UM", "UH", "AH", "OH", "A", "O", "HỬ", "Ử"]
+        
+        is_trash = False
+        if text_upper in blacklist:
+            is_trash = True
+        elif len(text) < 2 and not text.isdigit():
+            is_trash = True
+        elif len(set(text_upper)) == 1 and len(text_upper) > 3:  # Repeated char
+            is_trash = True
+        elif text_upper in ["HỬ HỬ", "Ử Ử", "ỬA", "ỬM"]:  # Common Vietnamese fillers
+            is_trash = True
+            
+        if is_trash:
+            print(f"🚮 Filtered trash from live: '{text}'")
+            return  # Don't broadcast
+        # -------------------
+        
+        # Broadcast special "live_transcript" type
+        await manager.broadcast(meeting_id, {
+            'type': 'live_transcript',
+            'transcript': text,
+            'speaker': result.get('speaker', 'Unknown'),
+            'timestamp': datetime.now().isoformat()
+        })
+
 
 async def process_preview_broadcast(audio_data: bytes, meeting_id: str):
     """
@@ -304,6 +455,9 @@ async def process_full_meeting_and_broadcast(audio_data: bytes, meeting_id: str,
                         
                     conn.close()
                     print(f"💾 Saved {len(transcripts)} transcripts to DB.")
+                    
+                    # Add small delay to ensure frontend receives all broadcasts
+                    await asyncio.sleep(0.2)
                     
                 except Exception as db_err:
                     print(f"❌ DB Save Error: {db_err}")

@@ -91,9 +91,18 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       const loadMarkdown = async () => {
         try {
           console.log('📝 Parsing markdown to BlockNote blocks...');
-          const blocks = await editor.tryParseMarkdownToBlocks(data.markdown);
+
+          // Pre-process markdown to convert [MM:SS] to links
+          // Regex to find [MM:SS] and convert to [MM:SS](#transcript-seconds)
+          const processedMarkdown = data.markdown.replace(/\[(\d{2}):(\d{2})\]/g, (match: string, min: string, sec: string) => {
+            const totalSeconds = parseInt(min) * 60 + parseInt(sec);
+            // Use specific transcript-ID format expected by TranscriptView
+            return `[${match}](#transcript-${totalSeconds})`;
+          });
+
+          const blocks = await editor.tryParseMarkdownToBlocks(processedMarkdown);
           editor.replaceBlocks(editor.document, blocks);
-          console.log('✅ Markdown parsed successfully');
+          console.log('✅ Markdown parsed successfully with citations');
 
           // Delay to ensure editor has finished rendering before allowing onChange
           setTimeout(() => {
@@ -219,7 +228,28 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   if (format === 'blocknote') {
     console.log('🎨 Rendering BLOCKNOTE format (direct)');
     return (
-      <div className="flex flex-col w-full">
+      <div
+        className="flex flex-col w-full"
+        onClickCapture={(e) => {
+          const target = e.target as HTMLElement;
+          const anchor = target.closest('a');
+
+          if (anchor && anchor.hash && anchor.hash.startsWith('#transcript-')) {
+            e.preventDefault();
+            e.stopPropagation();
+
+            const targetId = anchor.hash.substring(1);
+            console.log('🔗 Intercepted citation click (Capture Phase - Direct):', targetId);
+
+            const element = document.getElementById(targetId);
+            if (element) {
+              element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              const event = new CustomEvent('highlightTranscript', { detail: targetId });
+              window.dispatchEvent(event);
+            }
+          }
+        }}
+      >
         <div className="w-full">
           <Editor
             initialContent={data.summary_json}
@@ -238,7 +268,28 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   if (format === 'markdown') {
     console.log('🎨 Rendering MARKDOWN format (parsed to BlockNote)');
     return (
-      <div className="flex flex-col w-full">
+      <div
+        className="flex flex-col w-full"
+        onClickCapture={(e) => {
+          const target = e.target as HTMLElement;
+          const anchor = target.closest('a');
+
+          if (anchor && anchor.hash && anchor.hash.startsWith('#transcript-')) {
+            e.preventDefault();
+            e.stopPropagation(); // Stop bubbling immediately
+
+            const targetId = anchor.hash.substring(1);
+            console.log('🔗 Intercepted citation click (Capture Phase):', targetId);
+
+            const element = document.getElementById(targetId);
+            if (element) {
+              element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              const event = new CustomEvent('highlightTranscript', { detail: targetId });
+              window.dispatchEvent(event);
+            }
+          }
+        }}
+      >
         <div className="w-full">
           <BlockNoteView
             editor={editor}

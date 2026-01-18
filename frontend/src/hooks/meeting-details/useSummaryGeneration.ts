@@ -61,6 +61,7 @@ export function useSummaryGeneration({
   }: {
     transcriptText: string;
     customPrompt?: string;
+    metadata?: any;
     isRegeneration?: boolean;
   }) => {
     setSummaryStatus(isRegeneration ? 'regenerating' : 'processing');
@@ -103,19 +104,15 @@ export function useSummaryGeneration({
         model: modelConfig.model || 'gemma2:2b',
         api_key: modelConfig.apiKey || undefined,
         custom_prompt: customPrompt,
-        meeting_id: meeting.id
+        meeting_id: meeting.id,
+        metadata: (arguments[0] as any).metadata // Access metadata from args
       });
 
       console.log('✅ Summary generation completed:', result);
 
-      // Use the raw structure (let BlockNoteSummaryView handle detection)
-      // If we got parsed summary directly
-      if (result.summary) {
-        setAiSummary(result.summary as Summary);
-      } else {
-        // Fallback or specific logic if response structure differs
-        setAiSummary(result as unknown as Summary);
-      }
+      // CRITICAL FIX: Store the FULL response (including markdown field)
+      // BlockNoteSummaryView needs the markdown field to properly render tables
+      setAiSummary(result as any);
 
       setSummaryStatus('completed');
 
@@ -183,62 +180,37 @@ export function useSummaryGeneration({
       template: selectedTemplate
     });
 
-    // 🔥 AUTO-ENHANCE: Build enhanced context with speaker info and meeting time
-    let enhancedPrompt = '';
-
-    // Add meeting time context
+    // Construct metadata
+    let meetingDate = new Date();
     if (meeting.created_at) {
-      const meetingDate = new Date(meeting.created_at);
-      const formattedDate = meetingDate.toLocaleString('vi-VN', {
-        weekday: 'long',
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
-      });
-      enhancedPrompt += `THÔNG TIN CUỘC HỌP:\n`;
-      enhancedPrompt += `- Thời gian: ${formattedDate}\n`;
-      enhancedPrompt += `- Số lượng transcript: ${transcripts.length}\n`;
-      enhancedPrompt += `\n`;
+      // Check if timestamp is in seconds (10 digits) or ms (13 digits)
+      const timestamp = meeting.created_at < 10000000000 ? meeting.created_at * 1000 : meeting.created_at;
+      meetingDate = new Date(timestamp);
     }
 
-    // Add speaker mapping context
-    const speakersWithNames = transcripts
-      .filter(t => t.speaker)
-      .reduce((acc, t) => {
-        if (t.speaker && !acc.has(t.speaker)) {
-          acc.set(t.speaker, t.speaker);
-        }
-        return acc;
-      }, new Map<string, string>());
+    const metadata = {
+      meeting_title: meeting.title || 'Cuộc họp không tên',
+      date: meetingDate.toLocaleString('vi-VN'),
+      participants: Array.from(new Set(transcripts.map(t => t.speaker).filter(Boolean)))
+    };
 
-    if (speakersWithNames.size > 0) {
-      enhancedPrompt += `DANH SÁCH NGƯỜI NÓI ĐƯỢC NHẬN DIỆN:\n`;
-      Array.from(speakersWithNames.entries()).forEach(([speakerId, name]) => {
-        enhancedPrompt += `- ${speakerId}: ${name}\n`;
-      });
-      enhancedPrompt += `\n`;
-      enhancedPrompt += `LƯU Ý: Trong transcript, mỗi phát biểu đều có speaker label. Hãy dùng thông tin này để map với tên người được nhắc đến trong cuộc họp.\n\n`;
-    }
-
-    // Append user's custom prompt if provided
-    if (customPrompt.trim()) {
-      enhancedPrompt += `NGỮ CẢNH BỔ SUNG TỪ NGƯỜI DÙNG:\n${customPrompt}\n\n`;
-    }
-
-    // Format transcript with speaker labels and timestamps for better context
+    // Format transcript with speaker labels and timestamps
     const fullTranscript = transcripts.map(t => {
+      // FIX: Database uses 'transcript' column, not 'text'
+      const content = (t as any).transcript || t.text || '';
       if (t.speaker) {
-        const timestamp = t.audio_start_time ?
-          `[${Math.floor(t.audio_start_time / 60).toString().padStart(2, '0')}:${Math.floor(t.audio_start_time % 60).toString().padStart(2, '0')}]` :
-          '';
-        return `${timestamp} ${t.speaker}: ${t.text}`;
+        // Simplified formatting
+        return `${t.speaker}: ${content}`;
       }
-      return t.text;
+      return content;
     }).join('\n');
 
-    await processSummary({ transcriptText: fullTranscript, customPrompt: enhancedPrompt });
+    // Pass metadata separately, do NOT bake into customPrompt
+    await processSummary({
+      transcriptText: fullTranscript,
+      customPrompt: customPrompt, // Only user input
+      metadata: metadata
+    });
   }, [transcripts, meeting, processSummary, modelConfig, isModelConfigLoading, selectedTemplate]);
 
   // Public API: Regenerate summary from original transcript

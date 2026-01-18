@@ -169,6 +169,32 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({ transcripts, isR
     return () => window.removeEventListener('confidenceIndicatorChanged', handleConfidenceChange);
   }, []);
 
+  // NEW: Listen for highlight requests (from summary citations)
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const handleHighlight = (e: Event) => {
+      const customEvent = e as CustomEvent<string>;
+      const targetId = customEvent.detail;
+
+      // Extract timestamp from ID (transcript-123 -> 123)
+      // We need to find the actual transcript object ID that matches this timestamp
+      const timestamp = parseInt(targetId.replace('transcript-', ''));
+
+      // Find transcript with this start time
+      const transcript = transcripts.find(t => Math.floor(t.audio_start_time || 0) === timestamp);
+
+      if (transcript) {
+        setHighlightedId(transcript.id);
+        // Remove highlight after 3 seconds
+        setTimeout(() => setHighlightedId(null), 3000);
+      }
+    };
+
+    window.addEventListener('highlightTranscript', handleHighlight);
+    return () => window.removeEventListener('highlightTranscript', handleHighlight);
+  }, [transcripts]);
+
   // Listen for speech-detected event (Desktop only - disabled for web)
   useEffect(() => {
     // Web version: Speech detection is not available
@@ -300,7 +326,8 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({ transcripts, isR
             initial={{ opacity: 0, y: 5 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.15 }}
-            className="mb-3 scroll-mt-20"
+            className={`mb-3 scroll-mt-20 rounded-lg p-2 transition-colors duration-500 ${highlightedId === transcript.id ? 'bg-yellow-100 ring-2 ring-yellow-300' : ''
+              }`}
             id={`transcript-${Math.floor(transcript.audio_start_time || 0)}`}
             data-time={Math.floor(transcript.audio_start_time || 0)}
           >
