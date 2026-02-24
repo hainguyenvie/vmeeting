@@ -9,6 +9,9 @@ from fastapi.responses import JSONResponse
 import uvicorn
 import os
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 # Initialize FastAPI app
 app = FastAPI(
