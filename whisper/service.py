@@ -527,6 +527,11 @@ async def run_diarize_first_pipeline(audio_bytes, speaker_mgr, stt_engine):
     # 2. Preprocess
     audio = preprocess_audio_pipeline(audio)
     
+    # FIX: Calculate adaptive energy threshold based on audio RMS
+    audio_rms = np.sqrt(np.mean(audio**2))
+    energy_threshold = max(audio_rms * 0.03, 0.0001)  # 3% of RMS, minimum 0.0001
+    print(f"🎚️ Adaptive Energy Threshold: {energy_threshold:.6f} (Audio RMS: {audio_rms:.6f})")
+    
     # 3. Diarize (Full Scan)
     print("🔍 [Pipeline] Step 1: Diarizing...")
     
@@ -546,6 +551,10 @@ async def run_diarize_first_pipeline(audio_bytes, speaker_mgr, stt_engine):
     
     # Local speaker registry for this session
     session_speakers = [] # {id, centroid, vector_sum, count}
+    
+    # FIX: Track statistics for debugging
+    total_chunks = 0
+    skipped_chunks = 0
     
     def get_embedding(chunk):
         stream = speaker_mgr.extractor.create_stream()
@@ -582,8 +591,18 @@ async def run_diarize_first_pipeline(audio_bytes, speaker_mgr, stt_engine):
     # Scan
     for i in range(0, total_len - window_samples, step_samples):
         chunk = audio[i : i+window_samples]
-        energy = np.mean(chunk**2)
-        if energy < 0.001: 
+        total_chunks += 1
+        
+        # FIX: Use RMS instead of mean energy for better detection
+        rms = np.sqrt(np.mean(chunk**2))
+        
+        # FIX: Use adaptive threshold
+        if rms < energy_threshold:
+            skipped_chunks += 1
+            # FIX: Debug logging for skipped chunks (only every 5 seconds to avoid spam)
+            if i % (16000 * 5) == 0:
+                print(f"⚡ Skip low energy chunk at {i/16000.0:.2f}s (RMS={rms:.6f} < threshold={energy_threshold:.6f})")
+            
             if current_spk != -1:
                 timeline.append((current_start, i/16000.0 + window_sec, current_spk))
                 current_spk = -1
@@ -604,6 +623,16 @@ async def run_diarize_first_pipeline(audio_bytes, speaker_mgr, stt_engine):
     if current_spk != -1:
          timeline.append((current_start, total_len/16000.0, current_spk))
 
+    # FIX: Print scan statistics
+    print(f"📊 Scan Stats: {total_chunks} chunks, {skipped_chunks} skipped ({skipped_chunks/total_chunks*100:.1f}%)")
+    print(f"📊 Raw Timeline: {len(timeline)} segments")
+    
+    # FIX: Debug - print all raw timeline segments
+    for idx, (start, end, spk) in enumerate(timeline[:20]):  # First 20 segments
+        print(f"  [{idx}] {start:.2f} - {end:.2f} Speaker {spk} (duration: {end-start:.2f}s)")
+    if len(timeline) > 20:
+        print(f"  ... and {len(timeline)-20} more segments")
+
     # 4. Merge
     print("🔗 [Pipeline] Step 2: Merging...")
     merged_timeline = []
@@ -612,17 +641,39 @@ async def run_diarize_first_pipeline(audio_bytes, speaker_mgr, stt_engine):
         for i in range(1, len(timeline)):
             s, e, spk = timeline[i]
             gap = s - curr_end
-            if spk == curr_spk and gap < 2.0:
+            
+            # FIX: Increase gap tolerance to 3.0s (from 2.0s)
+            if spk == curr_spk and gap < 3.0:
                 curr_end = max(curr_end, e)
             else:
-                if curr_end - curr_start > 1.0:
+                # FIX: Decrease minimum duration to 0.3s (from 1.0s)
+                if curr_end - curr_start > 0.3:
                     merged_timeline.append((curr_start, curr_end, curr_spk))
+                else:
+                    print(f"⚠️ Filtered short segment: {curr_start:.2f}-{curr_end:.2f} (duration: {curr_end-curr_start:.2f}s)")
                 curr_start = s
                 curr_end = e
                 curr_spk = spk
-        if curr_end - curr_start > 1.0:
+        
+        # FIX: Decrease minimum duration for final segment
+        if curr_end - curr_start > 0.3:
             merged_timeline.append((curr_start, curr_end, curr_spk))
-            
+        else:
+            print(f"⚠️ Filtered short final segment: {curr_start:.2f}-{curr_end:.2f} (duration: {curr_end-curr_start:.2f}s)")
+    
+    # FIX: Print merged timeline
+    print(f"📊 Merged Timeline: {len(merged_timeline)} segments")
+    for idx, (start, end, spk) in enumerate(merged_timeline):
+        print(f"  [{idx}] {start:.2f} - {end:.2f} Speaker {spk} (duration: {end-start:.2f}s)")
+    
+    # FIX: Check for gaps in merged timeline
+    if len(merged_timeline) > 1:
+        print("🔍 Analyzing gaps between segments:")
+        for i in range(len(merged_timeline) - 1):
+            gap = merged_timeline[i+1][0] - merged_timeline[i][1]
+            if gap > 1.0:  # Report gaps > 1s
+                print(f"  ⚠️ GAP: {merged_timeline[i][1]:.2f} → {merged_timeline[i+1][0]:.2f} ({gap:.2f}s)")
+        
     # 5. Transcribe Segments
     print("📝 [Pipeline] Step 3: Transcribing...")
     final_output = []
@@ -646,9 +697,13 @@ async def run_diarize_first_pipeline(audio_bytes, speaker_mgr, stt_engine):
                 "speaker": f"Speaker {spk+1}",
                 "text": text
             })
+            print(f"  ✅ [{start:.2f}-{end:.2f}] Speaker {spk+1}: {text[:50]}...")
+        else:
+            print(f"  ⚠️ Empty transcription for segment {start:.2f}-{end:.2f}")
             
     elapsed = time.time() - start_time
     print(f"✅ Full Pipeline Complete in {elapsed:.2f}s")
+    print(f"📊 Final Output: {len(final_output)} transcribed segments")
     return final_output
 
 @app.post("/process_full_meeting")
@@ -667,6 +722,53 @@ async def process_full_meeting(file: UploadFile = File(...)):
     results = await run_diarize_first_pipeline(audio_data, speaker_manager, engine)
     
     return {"status": "ok", "transcripts": results}
+
+# ==========================================
+# 5. OPENAI COMPATIBLE ENDPOINT
+# ==========================================
+
+@app.post("/v1/audio/transcriptions")
+async def openai_transcriptions(
+    file: UploadFile = File(...),
+    model: str = Form("whisper-1"),
+    response_format: str = Form("json"),
+    temperature: float = Form(0.0),
+):
+    """
+    OpenAI-compatible endpoint for transcriptions.
+    """
+    try:
+        # Load audio data
+        audio_data = await file.read()
+        audio_file = io.BytesIO(audio_data)
+        
+        # Use default Zipformer engine
+        engine = engines["zipformer"]
+        if not engine.loaded: engine.load()
+        
+        # Transcribe
+        result = engine.transcribe(audio_file)
+        text = result['text']
+        
+        # Format response based on requests
+        if response_format == "json":
+            return {"text": text}
+        elif response_format == "text":
+            return text
+        elif response_format == "verbose_json":
+            return {
+                "task": "transcribe",
+                "language": "english", # Zipformer is English/Multilingual? Assuming detected or default
+                "duration": result.get('total_ms', 0) / 1000.0,
+                "text": text,
+                "segments": result.get('segments', [])
+            }
+        else:
+            return {"text": text}
+
+    except Exception as e:
+        print(f"❌ OpenAI Endpoint Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8178)

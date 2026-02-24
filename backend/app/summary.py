@@ -3,16 +3,27 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import json
 import os
-import httpx
 from pathlib import Path
 from openai import AsyncOpenAI
+import sqlite3
+from app.database import get_db_path
+import re
 
 # Initialize router
 router = APIRouter()
 
-# Configuration
-OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/generate")
-TEMPLATES_DIR = Path(__file__).parent / "templates"
+# Configuration - Read from environment variables (NO hardcoded secrets)
+# Set these in your .env file or system environment:
+#   LLM_BASE_URL=https://your-llm-endpoint/v1
+#   LLM_API_KEY=your-api-key-here
+#   LLM_MODEL=your-model-name
+VIETTEL_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1")  # Default: local Ollama
+VIETTEL_API_KEY = os.getenv("LLM_API_KEY", "not-needed")                  # Required: set in .env
+VIETTEL_DEFAULT_MODEL = os.getenv("LLM_MODEL", "qwen2.5:72b")             # Default: local model
+
+# FIXED TEMPLATE PATH - Only one template is used
+TEMPLATE_FILE = Path("app/templates/bien_ban_hop_vn.json")
+print(f"📋 Using fixed template: {TEMPLATE_FILE}")
 
 # Models
 class TemplateInfo(BaseModel):
@@ -23,9 +34,10 @@ class TemplateInfo(BaseModel):
 class GenerateRequest(BaseModel):
     transcript: str
     template_id: str
-    provider: str = "ollama"  # "ollama" or "openai"
-    model: str = "gemma2:2b"  # Default model
-    api_key: Optional[str] = None  # For OpenAI
+    # Legacy fields kept for API compatibility but ignored/forced in logic
+    provider: str = "viettel"
+    model: str = VIETTEL_DEFAULT_MODEL
+    api_key: Optional[str] = None
     custom_prompt: Optional[str] = None
     meeting_id: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
@@ -35,186 +47,44 @@ class SummaryResponse(BaseModel):
     raw_summary: Optional[str] = None
     model: str
     markdown: Optional[str] = None
-    summary_json: Optional[List[Dict[str, Any]]] = None  # BlockNote blocks format
+    html: Optional[str] = None  # NEW: HTML format
+    summary_json: Optional[List[Dict[str, Any]]] = None
 
 # Helper to load templates
 def get_templates() -> List[Dict]:
-    templates = []
-    if not TEMPLATES_DIR.exists():
-        return templates
-    
-    for file in TEMPLATES_DIR.glob("*.json"):
-        try:
-            with open(file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                templates.append({
-                    "id": file.stem,
-                    "name": data.get("name", file.stem),
-                    "description": data.get("description", "")
-                })
-        except Exception as e:
-            print(f"Error loading template {file}: {e}")
-    return templates
+    """Return the single fixed template info"""
+    return [{
+        "id": "bien_ban_hop_vn",
+        "name": "Biên bản họp (Vietnamese)",
+        "description": "Template biên bản họp chuyên nghiệp (fixed)"
+    }]
 
-def get_template_content(template_id: str) -> Optional[Dict]:
-    file_path = TEMPLATES_DIR / f"{template_id}.json"
-    if not file_path.exists():
+def get_template_content(template_id: str = None) -> Optional[Dict]:
+    """
+    Load the fixed template file.
+    template_id parameter is ignored - always uses bien_ban_hop_vn.json
+    """
+    if not os.path.exists(TEMPLATE_FILE):
+        print(f"❌ Template file not found at: {TEMPLATE_FILE}")
         return None
+    
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
+        with open(TEMPLATE_FILE, "r", encoding="utf-8") as f:
+            template = json.load(f)
+        return template
+    except Exception as e:
+        print(f"❌ Error loading template: {e}")
         return None
-
-def json_to_blocknote(summary_data: dict, template: dict) -> List[Dict[str, Any]]:
-    """Convert JSON summary to BlockNote blocks format"""
-    blocks = []
-    
-    for section in template.get("sections", []):
-        title = section["title"]
-        content = summary_data.get(title)
-        
-        if not content:
-            continue
-        
-        # Add section heading
-        blocks.append({
-            "id": f"heading-{len(blocks)}",
-            "type": "heading",
-            "props": {"level": 2, "textColor": "default", "backgroundColor": "default", "textAlignment": "left"},
-            "content": [{"type": "text", "text": title, "styles": {}}],
-            "children": []
-        })
-        
-        if isinstance(content, list):
-            # Check if this list should be a table (List of Dicts)
-            is_table = False
-            table_rows = []
-            
-            if len(content) > 0:
-                first_item = content[0]
-                if isinstance(first_item, dict):
-                    # List of dicts -> Table
-                    is_table = True
-                    # Get headers from first dict keys
-                    headers = list(first_item.keys())
-                    
-                    # Create Header Row
-                    header_cells = [[{"type": "text", "text": f"**{h}**", "styles": {"bold": True}}] for h in headers]
-                    table_rows.append({"cells": header_cells})
-                    
-                    # Create Data Rows
-                    for item in content:
-                        if isinstance(item, dict):
-                            row_cells = []
-                            for h in headers:
-                                val = str(item.get(h, ""))
-                                row_cells.append([{"type": "text", "text": val, "styles": {}}])
-                            table_rows.append({"cells": row_cells})
-                            
-                elif isinstance(first_item, str) and "|" in first_item:
-                    # List of pipe-delimited strings -> Table
-                    # Try to parse markdown table
-                    is_table = True
-                    for row_str in content:
-                         # Skip divider rows
-                         if set(row_str.strip()).issubset(set("|- ")):
-                             continue
-                             
-                         # Parse cells
-                         cells_text = [c.strip() for c in row_str.strip("|").split("|")]
-                         row_cells = []
-                         for c_text in cells_text:
-                             # Check for bold syntax **text**
-                             styles = {}
-                             if c_text.startswith("**") and c_text.endswith("**"):
-                                 c_text = c_text[2:-2]
-                                 styles["bold"] = True
-                             row_cells.append([{"type": "text", "text": c_text, "styles": styles}])
-                         table_rows.append({"cells": row_cells})
-
-            if is_table and table_rows:
-                blocks.append({
-                    "id": f"table-{len(blocks)}",
-                    "type": "table",
-                    "props": {"textColor": "default", "backgroundColor": "default"},
-                    "content": {
-                        "type": "tableContent",
-                        "rows": table_rows
-                    },
-                    "children": []
-                })
-            else:
-                # Regular list
-                for item in content:
-                    text_content = str(item)
-                    if isinstance(item, dict):
-                         text_content = " | ".join([f"**{k}**: {v}" for k, v in item.items()])
-                         
-                    blocks.append({
-                        "id": f"block-{len(blocks)}",
-                        "type": "bulletListItem",
-                        "props": {"textColor": "default", "backgroundColor": "default", "textAlignment": "left"},
-                        "content": [{"type": "text", "text": text_content, "styles": {}}],
-                        "children": []
-                    })
-
-        elif isinstance(content, str):
-            # Paragraph
-            blocks.append({
-                "id": f"block-{len(blocks)}",
-                "type": "paragraph",
-                "props": {"textColor": "default", "backgroundColor": "default", "textAlignment": "left"},
-                "content": [{"type": "text", "text": content, "styles": {}}],
-                "children": []
-            })
-            
-        elif isinstance(content, dict):
-             # Handle single dict content (treat as key-value list)
-            text_content = " | ".join([f"**{k}**: {v}" for k, v in content.items()])
-            blocks.append({
-                "id": f"block-{len(blocks)}",
-                "type": "paragraph",
-                "props": {"textColor": "default", "backgroundColor": "default", "textAlignment": "left"},
-                "content": [{"type": "text", "text": text_content, "styles": {}}],
-                "children": []
-            })
-        else:
-            print(f"⚠️ Warning: Unknown content type for section '{title}': {type(content)}")
-    
-    # DEBUG LOGGING (User requested)
-    print(f"\n🧱 GENERATED BLOCKNOTE JSON DEBUG ({len(blocks)} blocks):")
-    print("-" * 40)
-    # Print first few blocks and any tables
-    for i, b in enumerate(blocks):
-        if b['type'] == 'table':
-            print(f"[{i}] TABLE BLOCK: {json.dumps(b, ensure_ascii=False)[:200]}...")
-        elif i < 10: # Print more blocks to debug missing sections
-            print(f"[{i}] {b['type']}: {str(b.get('content', ''))[:100]}")
-    print("-" * 40)
-
-    return blocks
 
 def json_to_markdown(summary_data: dict, template: dict) -> str:
     """Convert JSON summary to markdown format"""
     markdown = ""
     
-    # DEBUG: Log all sections and their content types
-    print(f"\n🔍 json_to_markdown DEBUG:")
-    print(f"   Template has {len(template.get('sections', []))} sections")
-    print(f"   Summary data has {len(summary_data)} keys: {list(summary_data.keys())}")
-    for title, content in summary_data.items():
-        content_type = type(content).__name__
-        content_len = len(content) if isinstance(content, (list, str)) else "N/A"
-        is_empty = not content or (isinstance(content, (list, str)) and len(content) == 0)
-        print(f"   - '{title}': {content_type} (len={content_len}, empty={is_empty})")
-    
     for section in template.get("sections", []):
         title = section["title"]
         content = summary_data.get(title)
         
         if not content:
-            print(f"   ⏭️ Skipping '{title}' (no content)")
             continue
         
         # Add section title as H2
@@ -260,51 +130,154 @@ def json_to_markdown(summary_data: dict, template: dict) -> str:
             # Plain text paragraphs
             markdown += f"{content}\n\n"
     
-    # DEBUG LOGGING (User requested)
-    print(f"\n📝 GENERATED MARKDOWN DEBUG ({len(markdown)} chars):")
-    print("-" * 40)
-    print(markdown[:500] + "..." if len(markdown) > 500 else markdown)
-    print("-" * 40)
-    
     return markdown
 
+def markdown_to_html(markdown_text: str, metadata: Optional[Dict[str, Any]] = None) -> str:
+    """
+    Convert markdown summary to simple, clean HTML.
+    Minimalist style matching standard document editors.
+    """
+    import re
+    from datetime import datetime
     
-    return markdown
+    # Extract metadata
+    meeting_title = metadata.get('meeting_title', 'Biên bản họp') if metadata else 'Biên bản họp'
+    date = metadata.get('date', datetime.now().strftime('%d/%m/%Y')) if metadata else datetime.now().strftime('%d/%m/%Y')
+    
+    # Start with Title and Metadata as simple HTML blocks
+    html = f"<h1>{meeting_title}</h1>"
+    html += f"<p><strong>Thời gian:</strong> {date}</p>"
+    html += "<p>---</p>"
+    
+    # Helper to parse inline formatting
+    def format_inline(text: str) -> str:
+        # Bold: **text** -> <strong>text</strong>
+        text = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', text)
+        # Italic: *text* -> <em>text</em>
+        text = re.sub(r'\*(?!\*)(.*?)\*', r'<em>\1</em>', text)
+        # Citations: [MM:SS] -> <span class="citation">[MM:SS]</span>
+        text = re.sub(r'\[(\d{1,2}:\d{2})\]', r'<span class="citation">[\1]</span>', text)
+        return text
 
-async def extract_atomic_facts(transcript: str, provider: str, model: str, api_key: Optional[str] = None) -> List[Dict]:
+    # Parse markdown line by line
+    lines = markdown_text.split('\n')
+    in_table = False
+    in_list = False
+    
+    for line in lines:
+        stripped = line.strip()
+        
+        # Empty lines
+        if not stripped:
+            if in_table:
+                html += '</tbody></table>'
+                in_table = False
+            elif in_list:
+                html += '</ul>'
+                in_list = False
+            continue
+        
+        # Headers (H2)
+        if stripped.startswith('## '):
+            if in_table:
+                html += '</tbody></table>'
+                in_table = False
+            if in_list:
+                html += '</ul>'
+                in_list = False
+            title = stripped[3:].strip()
+            title = format_inline(title)
+            html += f'<h2>{title}</h2>'
+        
+        # Tables
+        elif stripped.startswith('|'):
+            if in_list:
+                html += '</ul>'
+                in_list = False
+            
+            cells = [c.strip() for c in stripped.split('|')[1:-1]]
+            
+            if all(set(c) <= {'-', ':', ' '} for c in cells):
+                continue
+            
+            if not in_table:
+                # Add border attributes for better compatibility with editors/email
+                html += '<table border="1" cellpadding="5" cellspacing="0"><thead><tr>'
+                for cell in cells:
+                    html += f'<th>{format_inline(cell)}</th>'
+                html += '</tr></thead><tbody>'
+                in_table = True
+            else:
+                html += '<tr>'
+                for cell in cells:
+                    html += f'<td>{format_inline(cell)}</td>'
+                html += '</tr>'
+        
+        # Bullet Lists
+        elif stripped.startswith('- '):
+            if in_table:
+                html += '</tbody></table>'
+                in_table = False
+            if not in_list:
+                html += '<ul>'
+                in_list = True
+            
+            text = stripped[2:].strip()
+            html += f'<li>{format_inline(text)}</li>'
+        
+        # Paragraphs
+        else:
+            if in_table:
+                html += '</tbody></table>'
+                in_table = False
+            if in_list:
+                html += '</ul>'
+                in_list = False
+            
+            html += f'<p>{format_inline(stripped)}</p>'
+    
+    # Close any open tags at end
+    if in_table:
+        html += '</tbody></table>'
+    if in_list:
+        html += '</ul>'
+    
+    return html
+
+def clean_model_output(data: Any) -> Any:
+    """Recursively clean strings in JSON output from LLMs."""
+    if isinstance(data, dict):
+        return {k: clean_model_output(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [clean_model_output(item) for item in data]
+    elif isinstance(data, str):
+        return data.replace('\\n', '\n')
+    else:
+        return data
+
+async def extract_atomic_facts(transcript: str) -> List[Dict]:
     """
     Extract atomic facts from transcript using the Reframe/FRAME methodology.
-    This acts as a grounding step to prevent hallucinations.
+    ALWAYS uses Viettel Netmind.
     """
-    system_prompt = """You are an expert at breaking down meeting transcripts into atomic facts. Your task is to extract clear, factual statements with proper context.
+    system_prompt = """You are an expert at breaking down meeting transcripts into atomic facts. Your task is to extract clear, factual statements with proper context and TIMESTAMPS.
 
 IMPORTANT RULES:
 1. Output must be a valid JSON list of objects
 2. NEVER add information not in the transcript
-3. Skip unclear or ambiguous content
-4. Each fact must be atomic (single piece of information)
-5. NO hallucination or inference
+3. **MANDATORY**: Extract the timestamp `[MM:SS]` appearing before or near the fact.
 
-CONTENT GUIDELINES - STRICTLY FOLLOW:
-1. INCLUDE only:
-   - Clear, explicit statements
-   - Complete, meaningful information
-   - Actionable items or decisions
-   - Important discussion points
-   - Concrete facts or outcomes
+Input Example:
+"[00:15] Speaker A: We need to launch the product by Friday."
 
-2. EXCLUDE completely:
-   - Filler statements (e.g., "OK", "Right", "Mm-hmm")
-   - General acknowledgments
-   - Incomplete or unclear statements
-   - Transcription artifacts
-   - Side conversations
-   - Redundant information
-
-3. For each included fact, provide:
-   - "fact": Single, atomic piece of information
-   - "context": Current chunk's context
-   - "verbose_context": Historical context
+Output Example:
+[
+  {
+    "fact": "Speaker A states the product launch deadline is Friday",
+    "timestamp": "00:15",
+    "citation": "[00:15]"
+  }
+]
 
 Output Format:
 Must return a JSON object with a single key "facts" containing a list of objects:
@@ -313,15 +286,14 @@ Must return a JSON object with a single key "facts" containing a list of objects
         {
             "fact": "Clear atomic statement",
             "context": "Immediate context and implications",
-            "verbose_context": "Comprehensive context with history",
-            "timestamp": "Start time in seconds (float) or [MM:SS] string from source",
-            "citation": "[MM:SS] format string"
+            "timestamp": "MM:SS",
+            "citation": "[MM:SS]"
         }
     ]
 }"""
 
     user_prompt = f"""
-    Break down this transcript chunk into atomic facts with context.
+    Break down this transcript chunk into atomic facts with timestamp.
     
     Current chunk:
     {transcript}
@@ -330,317 +302,221 @@ Must return a JSON object with a single key "facts" containing a list of objects
     """
 
     try:
-        if provider == "openai":
-            if not api_key:
-                raise ValueError("API Key required for OpenAI")
-            
-            client = AsyncOpenAI(api_key=api_key)
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.1, # Low temperature for factual extraction
-                max_completion_tokens=4096
-            )
-            content = response.choices[0].message.content
-        else: # Ollama
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                response = await client.post(OLLAMA_API_URL, json={
-                    "model": model,
-                    "prompt": user_prompt,
-                    "system": system_prompt,
-                    "stream": False,
-                    "format": "json",
-                    "options": {
-                        "temperature": 0.1,
-                        "num_ctx": 8192
-                    }
-                })
-                if response.status_code != 200:
-                    raise Exception(f"Ollama error: {response.text}")
-                    
-                content = response.json().get("response", "")
+        # FORCE Use Viettel Netmind Configuration
+        client = AsyncOpenAI(
+            api_key=VIETTEL_API_KEY,
+            base_url=VIETTEL_BASE_URL,
+            default_headers={"Content-Type": "application/json"}
+        )
+        
+        print(f"🤖 atomic_facts: Calling Viettel Netmind ({VIETTEL_DEFAULT_MODEL})...")
+        
+        response = await client.chat.completions.create(
+            model=VIETTEL_DEFAULT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.1,
+            max_completion_tokens=4096
+        )
+        content = response.choices[0].message.content
 
-        # Parse JSON
+        # DEBUG: Print raw content to see what's wrong
+        # print(f"\n🐛 DEBUG: RAW ATOMIC FACTS RESPONSE:\n{content}\n")
+
+        # 1. Enhanced JSON Extraction (Regex)
+        json_match = re.search(r'```json\s*(.*?)\s*```', content, re.DOTALL)
+        if json_match:
+            content = json_match.group(1)
+        else:
+            # Maybe it's just code block without lang
+            code_match = re.search(r'```\s*(.*?)\s*```', content, re.DOTALL)
+            if code_match:
+                content = code_match.group(1)
+        
         content = content.strip()
-        if content.startswith("```json"): content = content[7:]
-        if content.endswith("```"): content = content[:-3]
         
         try:
             parsed_content = json.loads(content)
             
-            # OpenAI 'json_object' format forces a root object (dict), NOT a list
-            # So looking for 'facts', 'items', 'content' keys is correct
+            # 2. Flexible Structure Parsing
             facts = []
-            if isinstance(parsed_content, dict):
-                 # Try common keys
-                 for key in ['facts', 'items', 'statements', 'atomic_facts']:
+            if isinstance(parsed_content, list):
+                facts = parsed_content
+            elif isinstance(parsed_content, dict):
+                 # Search for common keys containing the list
+                 found = False
+                 for key in ['facts', 'items', 'statements', 'atomic_facts', 'response', 'data']:
                      if key in parsed_content and isinstance(parsed_content[key], list):
                          facts = parsed_content[key]
+                         found = True
                          break
-                 # If no list found, checking single object structure or list-like dict keys
-                 if not facts and "fact" in parsed_content: # Single fact object
-                     facts = [parsed_content]
-            elif isinstance(parsed_content, list):
-                 facts = parsed_content
+                 
+                 # If no list found, maybe the dict itself is a single fact?
+                 if not found:
+                     if "fact" in parsed_content: 
+                         facts = [parsed_content]
+                     else:
+                         # Last resort: look for ANY list in values
+                         for v in parsed_content.values():
+                             if isinstance(v, list):
+                                 facts = v
+                                 break
             
-            # Filter valid facts
+            # 3. Validation & Timestamp Normalization
             valid_facts = []
             for f in facts:
-                if isinstance(f, dict) and "fact" in f and f["fact"]:
-                    valid_facts.append(f)
-            
-            facts = valid_facts # Use filtered list
-            if isinstance(facts, dict):
-                # Check if it is a single fact object (has "fact" key)
-                if "fact" in facts:
-                     facts = [facts]
-                else:
-                    for k in ["facts", "atomic_facts", "items", "data", "response"]:
-                        if k in facts and isinstance(facts[k], list):
-                            facts = facts[k]
-                            break
-            
-            if not isinstance(facts, list):
-                print(f"⚠️ Warning: Atomic facts extraction returned {type(facts)} instead of list. Content: {content[:100]}...")
-                return []
+                # Handle simple strings
+                if isinstance(f, str):
+                    valid_facts.append({
+                        "fact": f, 
+                        "timestamp": "", 
+                        "citation": ""
+                    })
+                    continue
+                    
+                if isinstance(f, dict):
+                    # Get main fact text
+                    fact_txt = f.get("fact") or f.get("statement") or f.get("content")
+                    if not fact_txt:
+                        continue
+                     
+                    # Filter dummy error messages
+                    ft_lower = str(fact_txt).lower()
+                    if "no clear" in ft_lower or "error" in ft_lower:
+                        continue
 
-            # Filter out error messages masquerading as facts
-            valid_facts = []
-            for f in facts:
-                fact_text = f.get("fact", "").lower()
-                if "no clear" in fact_text and "explicit statements" in fact_text:
-                    continue
-                if "error" in fact_text and "transcript" in fact_text:
-                    continue
-                valid_facts.append(f)
-            
-            if len(valid_facts) == 0 and len(facts) > 0:
-                 print("⚠️ Extracted facts appear to be error messages. Returning empty to trigger fallback.")
+                    # Normalize Timestamp & Citation
+                    ts = f.get("timestamp", "")
+                    cit = f.get("citation", "")
+                    
+                    # Convert float timestamp to string if needed
+                    if isinstance(ts, (int, float)):
+                        ts = str(ts) 
+
+                    # Logic: Ensure both exist if one exists
+                    if ts and not cit:
+                        cit = f"[{ts}]"
+                    if cit and not ts:
+                        # Extract MM:SS from [MM:SS]
+                        ts_match = re.search(r'\[(\d{1,2}:\d{2})\]', cit)
+                        if ts_match:
+                            ts = ts_match.group(1)
+                        else:
+                            ts = cit.replace("[", "").replace("]", "")
+                        
+                    f["fact"] = fact_txt
+                    f["timestamp"] = ts
+                    f["citation"] = cit
+                    
+                    valid_facts.append(f)
+
+            if len(valid_facts) == 0:
+                 print(f"⚠️ Parsed JSON but found 0 valid facts.")
                  return []
                 
             print(f"✅ Extracted {len(valid_facts)} atomic facts")
             return valid_facts
             
         except json.JSONDecodeError:
-            print(f"❌ Failed to parse atomic facts JSON: {content[:100]}...")
-            # Fallback: try to just use lines if it looks like a list
+            print(f"❌ Failed to parse atomic facts JSON. Content: {content[:100]}...")
             return []
             
     except Exception as e:
         print(f"❌ Error extracting atomic facts: {str(e)}")
         # Fallback to returning original text as one fact
-        return [{"fact": transcript, "context": "Raw transcript due to error", "verbose_context": ""}]
+        return [{"fact": transcript, "context": "Error extracting facts", "verbose_context": ""}]
 
-async def generate_with_openai(request: GenerateRequest, template: dict, system_prompt: str, user_prompt: str) -> SummaryResponse:
-    """Generate summary using OpenAI API"""
-    if not request.api_key:
-        raise HTTPException(status_code=400, detail="OpenAI API key is required")
+async def generate_meeting_minutes(template: dict, system_prompt: str, user_prompt: str, metadata: Optional[Dict[str, Any]] = None) -> SummaryResponse:
+    """Generate summary using Viettel Netmind API (Markdown First strategy)"""
+    
+    print(f"🤖 generate_meeting_minutes: Calling Viettel Netmind ({VIETTEL_DEFAULT_MODEL})...")
     
     try:
-        client = AsyncOpenAI(api_key=request.api_key)
+        client = AsyncOpenAI(
+            api_key=VIETTEL_API_KEY,
+            base_url=VIETTEL_BASE_URL,
+            default_headers={"Content-Type": "application/json"}
+        )
         
         response = await client.chat.completions.create(
-            model=request.model,
+            model=VIETTEL_DEFAULT_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            response_format={"type": "json_object"},
-            temperature=0.3,
+            temperature=0.3, # Slightly creative but grounded
             max_completion_tokens=4096
         )
         
         generated_text = response.choices[0].message.content
+        clean_text = generated_text.strip()
         
-        # Parse JSON
+        # Cleanup code fences if present
+        if clean_text.startswith("```markdown"): clean_text = clean_text[11:]
+        if clean_text.startswith("```"): clean_text = clean_text[3:]
+        if clean_text.endswith("```"): clean_text = clean_text[:-3]
+        
+        clean_text = clean_text.strip()
+        
+        # Try to parse Markdown back to JSON (Sections) for structured storage if possible
+        # Simple parser: Split by "## "
+        summary_dict = {}
+        # current_section = "General" 
+        
+        # Create legacy summary structure for compatibility
+        legacy_summary = {}
+        
+        # We start with the full markdown
+        markdown_output = clean_text
+        
+        # Generate HTML output
+        html_output = markdown_to_html(markdown_output, metadata)
+        print("✅ Generated HTML output from markdown")
+        
         try:
-            clean_text = generated_text.strip()
-            if clean_text.startswith("```json"):
-                clean_text = clean_text[7:]
-            if clean_text.endswith("```"):
-                clean_text = clean_text[:-3]
+             # Basic Markdown to Dict parsing for Legacy UI support
+             lines = clean_text.split('\n')
+             current_key = "Tổng quan"
+             buffer = []
+             
+             for line in lines:
+                 if line.strip().startswith("## "):
+                     # New section
+                     if list(buffer):
+                         summary_dict[current_key] = "\n".join(buffer).strip()
+                     
+                     current_key = line.strip().replace("## ", "").strip()
+                     buffer = []
+                 else:
+                     buffer.append(line)
+             
+             if list(buffer):
+                 summary_dict[current_key] = "\n".join(buffer).strip()
+                 
+             # Populate legacy_summary based on parsed sections
+             for key, content in summary_dict.items():
+                 legacy_summary[key] = {
+                     "title": key,
+                     "blocks": [{"content": content, "type": "paragraph", "id": f"{key}-0"}]
+                 }
+                 
+        except Exception as e:
+            print(f"⚠️ Failed to parse markdown back to structure: {e}")
             
-            summary_data = json.loads(clean_text)
-            
-            # DEBUG: Show what OpenAI returned vs what template expects
-            print(f"\n{'='*60}")
-            print(f"📊 OPENAI JSON PARSING DEBUG")
-            print(f"{'='*60}")
-            print(f"✅ OpenAI returned keys: {list(summary_data.keys())}")
-            print(f"✅ Template expects sections:")
-            for section in template.get("sections", []):
-                print(f"  - '{section['title']}'")
-            print(f"{'='*60}\n")
-            
-            # Handle different response formats
-            # If OpenAI returned template structure (with 'sections' array), extract the data
-            if 'sections' in summary_data and isinstance(summary_data['sections'], list):
-                print("⚠️ OpenAI returned template format - extracting data from sections array")
-                # Rebuild as flat dict keyed by section title
-                flattened = {}
-                for section_data in summary_data['sections']:
-                    if isinstance(section_data, dict) and 'title' in section_data:
-                        title = section_data['title']
-                        content = section_data.get('content') or section_data.get('items') or section_data.get('text', '')
-                        flattened[title] = content
-                summary_data = flattened
-                print(f"✅ Flattened to keys: {list(summary_data.keys())}")
-            
-            # Convert to formats
-            markdown = json_to_markdown(summary_data, template)
-            # blocknote_blocks = json_to_blocknote(summary_data, template)  # DISABLED - using markdown only
-            
-            # Also create legacy format for compatibility
-            legacy_summary = {}
-            for section in template.get("sections", []):
-                title = section["title"]
-                content = summary_data.get(title)
-                
-                if content:
-                    blocks = []
-                    if isinstance(content, list):
-                        for item in content:
-                            if isinstance(item, dict):
-                                text = " | ".join([f"**{k}**: {v}" for k,v in item.items()])
-                                blocks.append({"content": text, "type": "paragraph", "id": f"{title}-{len(blocks)}"})
-                            else:
-                                blocks.append({"content": str(item), "type": "bulletListItem", "id": f"{title}-{len(blocks)}"})
-                    elif isinstance(content, str):
-                        blocks.append({"content": content, "type": "paragraph", "id": f"{title}-0"})
-                        
-                    legacy_summary[title] = {
-                        "title": title,
-                        "blocks": blocks
-                    }
-            
-            return SummaryResponse(
-                summary=legacy_summary,
-                markdown=markdown,
-                summary_json=None,  # DISABLED: Using pure markdown for reliability
-                raw_summary=generated_text,
-                model=request.model
-            )
-            
-        except json.JSONDecodeError as e:
-            print(f"Failed to parse JSON from OpenAI: {generated_text}")
-            print(f"Error: {e}")
-            # Return raw text as markdown
-            return SummaryResponse(
-                summary={
-                    "Error": {
-                        "title": "Error Parsing Summary",
-                        "blocks": [{"content": "The model response was not valid JSON.", "type": "paragraph", "id": "error-0"}]
-                    }
-                },
-                markdown=f"## Error\n\n{generated_text}",
-                raw_summary=generated_text,
-                model=request.model
-            )
-            
+        return SummaryResponse(
+            summary=legacy_summary,
+            markdown=markdown_output, # Primary output
+            html=html_output,  # NEW: HTML output
+            summary_json=None,
+            raw_summary=generated_text,
+            model=VIETTEL_DEFAULT_MODEL
+        )
+
     except Exception as e:
-        print(f"OpenAI API Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"OpenAI API Error: {str(e)}")
-
-async def generate_with_ollama(request: GenerateRequest, template: dict, system_prompt: str, user_prompt: str) -> SummaryResponse:
-    """Generate summary using Ollama"""
-    try:
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            response = await client.post(OLLAMA_API_URL, json={
-                "model": request.model,
-                "prompt": user_prompt,
-                "system": system_prompt,
-                "stream": False,
-                "format": "json",
-                "options": {
-                    "temperature": 0.3,
-                    "num_ctx": 8192
-                }
-            })
-            
-            if response.status_code != 200:
-                raise HTTPException(status_code=500, detail=f"Ollama Error: {response.text}")
-            
-            result = response.json()
-            generated_text = result.get("response", "")
-            
-            # Parse JSON
-            try:
-                clean_text = generated_text.strip()
-                if clean_text.startswith("```json"):
-                    clean_text = clean_text[7:]
-                if clean_text.endswith("```"):
-                    clean_text = clean_text[:-3]
-                
-                summary_data = json.loads(clean_text)
-                
-                # Handle different response formats (same as OpenAI)
-                if 'sections' in summary_data and isinstance(summary_data['sections'], list):
-                    print("⚠️ Ollama returned template format - extracting data from sections array")
-                    flattened = {}
-                    for section_data in summary_data['sections']:
-                        if isinstance(section_data, dict) and 'title' in section_data:
-                            title = section_data['title']
-                            content = section_data.get('content') or section_data.get('items') or section_data.get('text', '')
-                            flattened[title] = content
-                    summary_data = flattened
-                    print(f"✅ Flattened to keys: {list(summary_data.keys())}")
-                
-                # Convert to formats
-                markdown = json_to_markdown(summary_data, template)
-                # blocknote_blocks = json_to_blocknote(summary_data, template)  # DISABLED
-                
-                # Also create legacy format
-                legacy_summary = {}
-                for section in template.get("sections", []):
-                    title = section["title"]
-                    content = summary_data.get(title)
-                    
-                    if content:
-                        blocks = []
-                        if isinstance(content, list):
-                            for item in content:
-                                if isinstance(item, dict):
-                                    text = " | ".join([f"**{k}**: {v}" for k,v in item.items()])
-                                    blocks.append({"content": text, "type": "paragraph", "id": f"{title}-{len(blocks)}"})
-                                else:
-                                    blocks.append({"content": str(item), "type": "bulletListItem", "id": f"{title}-{len(blocks)}"})
-                        elif isinstance(content, str):
-                            blocks.append({"content": content, "type": "paragraph", "id": f"{title}-0"})
-                            
-                        legacy_summary[title] = {
-                            "title": title,
-                            "blocks": blocks
-                        }
-                
-                return SummaryResponse(
-                    summary=legacy_summary,
-                    markdown=markdown,
-                    summary_json=None,  # DISABLED: Using pure markdown
-                    raw_summary=generated_text,
-                    model=request.model
-                )
-
-            except json.JSONDecodeError as e:
-                print(f"Failed to parse JSON from Ollama: {generated_text}")
-                print(f"Error: {e}")
-                return SummaryResponse(
-                    summary={
-                        "Error": {
-                            "title": "Error Parsing Summary",
-                            "blocks": [{"content": "The model response was not valid JSON.", "type": "paragraph", "id": "error-0"}]
-                        }
-                    },
-                    markdown=f"## Error\n\n{generated_text}",
-                    raw_summary=generated_text,
-                    model=request.model
-                )
-
-    except httpx.RequestError as e:
-         raise HTTPException(status_code=503, detail=f"Could not connect to Ollama service: {e}")
+        print(f"Viettel API Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Viettel API Error: {str(e)}")
 
 # Routes
 @router.get("/templates", response_model=List[TemplateInfo])
@@ -650,9 +526,53 @@ async def list_templates():
 
 @router.post("/generate", response_model=SummaryResponse)
 async def generate_summary(request: GenerateRequest):
-    """Generate summary using selected provider (Ollama or OpenAI)"""
+    """Generate summary using Viettel Netmind"""
     
     try:
+        # 0. Load Transcript with Timestamps from DB (Primary Source)
+        # This overrides the frontend text to ensure we have [MM:SS] format for citations
+        transcript_input = request.transcript
+        
+        if request.meeting_id:
+            try:
+                conn = sqlite3.connect(get_db_path())
+                cursor = conn.cursor()
+                
+                # Correct Schema: transcripts table stores individual segments as rows
+                # Columns: transcript, speaker, audio_start_time
+                cursor.execute("""
+                    SELECT audio_start_time, speaker, transcript 
+                    FROM transcripts 
+                    WHERE meeting_id = ? 
+                    ORDER BY audio_start_time ASC
+                """, (request.meeting_id,))
+                
+                rows = cursor.fetchall()
+                
+                if rows:
+                    print(f"✅ Loaded {len(rows)} segments from DB for timestamps.")
+                    formatted_lines = []
+                    for row in rows:
+                        start_s = row[0] if row[0] is not None else 0
+                        speaker = row[1] if row[1] else "Unknown"
+                        text = row[2] if row[2] else ""
+                        
+                        mm = int(start_s // 60)
+                        ss = int(start_s % 60)
+                        time_str = f"[{mm:02d}:{ss:02d}]"
+                        
+                        formatted_lines.append(f"{time_str} {speaker}: {text}")
+                    
+                    transcript_input = "\n".join(formatted_lines)
+                    print("✅ Formatted transcript with timestamps for LLM.")
+                else:
+                     print("⚠️ No transcript rows found in DB for this meeting_id.")
+                
+                conn.close()
+            except Exception as e:
+                print(f"❌ Error loading transcript from DB: {e}")
+                # Fallback to request.transcript (which might lack timestamps)
+
         # 1. Load Template
         template = get_template_content(request.template_id)
         if not template:
@@ -662,13 +582,7 @@ async def generate_summary(request: GenerateRequest):
         print(f"\n🚀 STARTING REFRAME PIPELINE...")
         print(f"1️⃣ Extracting Atomic Facts (Groundedness Check)...")
         
-        # Use a timeout or safeguards if needed, but for now we trust the helper
-        atomic_facts = await extract_atomic_facts(
-            request.transcript, 
-            request.provider, 
-            request.model, 
-            request.api_key
-        )
+        atomic_facts = await extract_atomic_facts(transcript_input)
         
         # Format facts for the generator
         facts_text = json.dumps(atomic_facts, ensure_ascii=False, indent=2)
@@ -676,53 +590,44 @@ async def generate_summary(request: GenerateRequest):
 
         # 3. Construct Improved Prompt (inspired by desktop app's Pydantic approach)
         
-        # 4. Inject Metadata Context
+        # Metadata Context
         metadata_context = ""
         if request.metadata:
             metadata_context = f"""
-THÔNG TIN CUỘC HỌP (SỬ DỤNG CHO PHẦN THÔNG TIN CHUNG):
+THÔNG TIN CUỘC HỌP:
 - Tiêu đề: {request.metadata.get('meeting_title', 'Không xác định')}
 - Thời gian: {request.metadata.get('date', 'Không xác định')}
 - Danh sách tham dự: {', '.join(request.metadata.get('participants', [])) if request.metadata.get('participants') else 'Không xác định'}
 """
+        # Build Section Guidelines
+        section_guidelines = ""
+        for section in template.get("sections", []):
+            section_guidelines += f"\n### {section['title']}\n- Yêu cầu: {section['instruction']}\n"
 
-        system_prompt = f"""Bạn là một thư ký cuộc họp chuyên nghiệp. Nhiệm vụ là tạo biên bản họp CHẤT LƯỢNG CAO từ danh sách "Atomic Facts" (Sự kiện đã xác thực).
+        system_prompt = f"""Bạn là thư ký cuộc họp chuyên nghiệp. Nhiệm vụ: Tạo biên bản họp CHẤT LƯỢNG CAO, CHÍNH XÁC theo cấu trúc yêu cầu.
 
 {metadata_context}
 
-CẤU TRÚC TEMPLATE:
-{json.dumps(template, ensure_ascii=False, indent=2)}
+CẤU TRÚC BIÊN BẢN (BẮT BUỘC TUÂN THỦ):
+Bạn phải tạo ra báo cáo định dạng MARKDOWN gồm đúng các mục sau đây (theo thứ tự):
+{section_guidelines}
 
-HƯỚNG DẪN CHI TIẾT:"""
-        
-        for section in template.get("sections", []):
-            system_prompt += f"\n- **{section['title']}**: {section['instruction']}"
-        
-        system_prompt += f"""
+QUY TẮC CITATION (BẮT BUỘC - RẤT QUAN TRỌNG):
+- Nguồn dữ liệu "Atomic Facts" có trường `citation` hoặc `timestamp`.
+- **MỌI THÔNG TIN QUAN TRỌNG** (Quyết định, Con số, Deadline, Chỉ đạo, Lý do) **PHẢI** có citation ở cuối câu.
+- Định dạng citation: `[MM:SS]` (Ví dụ: `[12:30]`, `[05:45]`).
+- Nếu 1 đoạn văn gồm nhiều ý từ cùng 1 thời điểm, đặt citation ở cuối đoạn.
+- **KHÔNG ĐƯỢC BỎ QUA BƯỚC NÀY**.
+- Ví dụ đúng:
+  - "Doanh thu tháng này đạt 5 tỷ. [10:15]"
+  - "Giám đốc yêu cầu nộp báo cáo trước thứ 6 [12:00] và phê bình việc đi muộn [12:05]."
 
-ĐỊNH DẠNG OUTPUT JSON:
-{{
-  "Section Title 1": <content>,
-  "Section Title 2": <content>,
-  ...
-}}
-
-QUY TẮC NỘI DUNG:
-- Content có thể là STRING (paragraph) hoặc ARRAY (danh sách items)
-- Nếu là array items, mỗi item có thể là string hoặc object với key-value pairs
-- VÍ DỤ danh sách người: {{"name": "Nguyễn Văn A", "role": "Trưởng phòng"}}
-- Sửa lỗi chính tả nếu có, văn phong trang trọng, chuyên nghiệp.
-- CHỈ SỬ DỤNG thông tin từ "SOURCE ATOMIC FACTS". Không bịa đặt thêm.
-- Nêu đầy đủ action items, deadlines, decisions
-- Nếu section không có info → trả về empty string "" hoặc empty array []
-
-CITATION RULES (QUAN TRỌNG):
-- Với mỗi facts quan trọng được sử dụng, CẦN kèm theo timestamp citation ở cuối câu.
-- Format: `[MM:SS]` (Ví dụ: `[12:30]`, `[01:05]`)
-- Citations phải chính xác với timestamp của Source Fact.
-- KHÔNG tự bịa ra timestamp.
-
-CRITICAL: Trả về PURE JSON, KHÔNG có ```json wrapper, KHÔNG có text dẫn dắt."""
+QUY TẮC FORMAT:
+1. Dùng Markdown Headers cấp 2 (`## `) cho tên các mục.
+2. Dùng Bảng (`|...|`) cho danh sách có nhiều trường thông tin.
+3. Dùng Bullet points (`- `) cho các ý liệt kê.
+4. KHÔNG dùng json code block. Trả về Markdown Text thuần túy.
+"""
 
         # Prepare input for summary generation
         if atomic_facts and len(atomic_facts) > 0:
@@ -733,8 +638,6 @@ CRITICAL: Trả về PURE JSON, KHÔNG có ```json wrapper, KHÔNG có text dẫ
             print("✅ Using ATOMIC FACTS for generation.")
         else:
             print("⚠️ Atomic facts empty. Falling back to RAW TRANSCRIPT.")
-            print(f"   📏 Transcript length: {len(request.transcript)} chars")
-            print(f"   📄 Transcript preview (first 200 chars): {request.transcript[:200]}...")
             user_prompt_content = f"""SOURCE TRANSCRIPT (SỬ DỤNG NỘI DUNG NÀY ĐỂ VIẾT BIÊN BẢN):
 ---
 {request.transcript}
@@ -745,35 +648,54 @@ CRITICAL: Trả về PURE JSON, KHÔNG có ```json wrapper, KHÔNG có text dẫ
 NGỮ CẢNH BỔ SUNG:
 {request.custom_prompt if request.custom_prompt else "Không có"}
 
-Hãy tạo biên bản họp chi tiết theo template dựa trên thông tin đã cung cấp. Output phải là RAW JSON."""
+Hãy tạo biên bản họp chi tiết bằng định dạng MARKDOWN."""
 
-        # 3. Generate based on provider
-        result = None
-        if request.provider == "openai":
-            result = await generate_with_openai(request, template, system_prompt, user_prompt)
-        else:  # Default to ollama
-            result = await generate_with_ollama(request, template, system_prompt, user_prompt)
+        # 3. Generate (pass metadata for HTML generation)
+        result = await generate_meeting_minutes(template, system_prompt, user_prompt, request.metadata)
         
-        # Debug logging
-        print(f"\n{'='*60}")
-        print(f"🎯 SUMMARY RESPONSE DEBUG")
-        print(f"{'='*60}")
-        print(f"✅ Provider: {request.provider}")
-        print(f"✅ Model: {result.model}")
-        print(f"✅ Has markdown: {result.markdown is not None}")
-        if result.markdown:
-            print(f"✅ Markdown length: {len(result.markdown)} chars")
-            print(f"✅ Markdown preview (first 200 chars):\n{result.markdown[:200]}...")
-        print(f"✅ Has summary: {result.summary is not None}")
-        print(f"✅ Summary keys: {list(result.summary.keys()) if result.summary else []}")
-        if result.summary:
-            for key, value in list(result.summary.items())[:2]:  # First 2 sections
-                print(f"  - Section '{key}': {len(value.get('blocks', []))} blocks")
-        print(f"✅ Has raw_summary: {result.raw_summary is not None}")
-        print(f"{'='*60}\n")
-        
+        # 4. Automatically Save to Database if meeting_id is provided
+        if request.meeting_id:
+            try:
+                print(f"💾 Saving summary to database for meeting: {request.meeting_id}")
+                # Prepare payload specifically for storage
+                save_payload = {}
+                
+                # Save Markdown (New Standard for display)
+                if result.markdown:
+                    save_payload["markdown"] = result.markdown
+                
+                # Save Legacy Summary (For compatibility)
+                if result.summary:
+                    save_payload.update(result.summary)
+                    
+                # Save Raw JSON/Blocks if available
+                if result.summary_json:
+                    save_payload["summary_json"] = result.summary_json
+                
+                json_str = json.dumps(save_payload, ensure_ascii=False)
+                
+                # Get HTML content
+                html_content = result.html if result.html else ""
+                
+                conn = sqlite3.connect(get_db_path())
+                cursor = conn.cursor()
+                cursor.execute("UPDATE meetings SET summary = ?, html_summary = ? WHERE id = ?", (json_str, html_content, request.meeting_id))
+                
+                if cursor.rowcount == 0:
+                    print(f"⚠️ Warning: Meeting ID {request.meeting_id} not found in DB.")
+                else:
+                    conn.commit()
+                    print(f"✅ Summary SAVED to Database successfully.")
+                    
+                conn.close()
+                
+            except Exception as e:
+                print(f"❌ Failed to save summary to DB: {e}")
+                import traceback
+                traceback.print_exc()
+
         return result
-            
+
     except HTTPException:
         raise
     except Exception as e:

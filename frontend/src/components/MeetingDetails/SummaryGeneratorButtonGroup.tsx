@@ -1,13 +1,6 @@
 "use client";
 
-import { ModelConfig, ModelSettingsModal } from '@/components/ModelSettingsModal';
-import {
-  Dialog,
-  DialogContent,
-  DialogTrigger,
-  DialogTitle,
-} from "@/components/ui/dialog"
-import { VisuallyHidden } from "@/components/ui/visually-hidden"
+import { ModelConfig } from '@/components/ModelSettingsModal';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
 import {
@@ -16,10 +9,9 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Sparkles, Settings, Loader2, FileText, Check } from 'lucide-react';
+import { Sparkles, Loader2, FileText, Check } from 'lucide-react';
 import Analytics from '@/lib/analytics';
 import { toast } from 'sonner';
-import { useState } from 'react';
 
 interface SummaryGeneratorButtonGroupProps {
   modelConfig: ModelConfig;
@@ -48,31 +40,14 @@ export function SummaryGeneratorButtonGroup({
   hasTranscripts = true,
   isModelConfigLoading = false
 }: SummaryGeneratorButtonGroupProps) {
-  const [isCheckingModels, setIsCheckingModels] = useState(false);
-  const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
 
   if (!hasTranscripts) {
     return null;
   }
 
-  const checkOllamaModelsAndGenerate = async () => {
-    // Only check for Ollama provider
-    if (modelConfig.provider !== 'ollama') {
-      onGenerateSummary(customPrompt);
-      return;
-    }
-
-    setIsCheckingModels(true);
-    try {
-      // For web version, we trust the backend handles Ollama connection
-      // Skipping client-side 'invoke' check which is desktop-specific
-      onGenerateSummary(customPrompt);
-    } catch (error) {
-      console.error('Error initiating summary generation:', error);
-      toast.error('Failed to start summary generation.');
-    } finally {
-      setIsCheckingModels(false);
-    }
+  // Simplified generation handler - No Ollama checks needed
+  const handleGenerateClick = () => {
+    onGenerateSummary(customPrompt);
   };
 
   return (
@@ -84,20 +59,18 @@ export function SummaryGeneratorButtonGroup({
         className="bg-gradient-to-r from-blue-50 to-purple-50 hover:from-blue-100 hover:to-purple-100 border-blue-200 xl:px-4"
         onClick={() => {
           Analytics.trackButtonClick('generate_summary', 'meeting_details');
-          checkOllamaModelsAndGenerate();
+          handleGenerateClick();
         }}
-        disabled={summaryStatus === 'processing' || isCheckingModels || isModelConfigLoading}
+        disabled={summaryStatus === 'processing' || isModelConfigLoading}
         title={
           isModelConfigLoading
-            ? 'Loading model configuration...'
+            ? 'Loading configuration...'
             : summaryStatus === 'processing'
               ? 'Generating summary...'
-              : isCheckingModels
-                ? 'Checking models...'
-                : 'Generate AI Summary'
+              : 'Generate AI Summary'
         }
       >
-        {summaryStatus === 'processing' || isCheckingModels || isModelConfigLoading ? (
+        {summaryStatus === 'processing' || isModelConfigLoading ? (
           <>
             <Loader2 className="animate-spin xl:mr-2" size={18} />
             <span className="hidden xl:inline">Processing...</span>
@@ -109,38 +82,6 @@ export function SummaryGeneratorButtonGroup({
           </>
         )}
       </Button>
-
-      {/* Settings button */}
-      <Dialog open={settingsDialogOpen} onOpenChange={setSettingsDialogOpen}>
-        <DialogTrigger asChild>
-          <Button
-            variant="outline"
-            size="sm"
-            title="Summary Settings"
-          >
-            <Settings />
-            <span className="hidden lg:inline">AI Model</span>
-          </Button>
-        </DialogTrigger>
-        <DialogContent
-          aria-describedby={undefined}
-        >
-          <VisuallyHidden>
-            <DialogTitle>Model Settings</DialogTitle>
-          </VisuallyHidden>
-          <ModelSettingsModal
-            onSave={async (config) => {
-              await onSaveModelConfig(config);
-              setSettingsDialogOpen(false);
-            }}
-            modelConfig={modelConfig}
-            setModelConfig={setModelConfig}
-            skipInitialFetch={true}
-          />
-        </DialogContent>
-      </Dialog>
-
-
 
       {/* Template selector dropdown */}
       {availableTemplates.length > 0 && (

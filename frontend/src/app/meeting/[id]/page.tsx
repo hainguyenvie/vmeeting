@@ -109,6 +109,11 @@ export default function MeetingDetailPage({ params }: { params: { id: string } }
         }
     }, [meetingId, setCurrentMeeting]);
 
+    // ✅ Stable callback for refreshing transcripts - prevents infinite loop
+    const handleRefreshTranscripts = useCallback(async () => {
+        await fetchMeetingDetails();
+    }, [fetchMeetingDetails]);
+
     // Reset states when meetingId changes
     useEffect(() => {
         setMeetingDetails(null);
@@ -161,7 +166,8 @@ export default function MeetingDetailPage({ params }: { params: { id: string } }
         };
 
         loadData();
-    }, [meetingId, fetchMeetingDetails]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [meetingId]); // ✅ FIX: Removed fetchMeetingDetails to prevent infinite loop polling
 
     // Initialize hooks ONLY when meeting data is available
     const meetingData = useMeetingData({
@@ -283,7 +289,7 @@ export default function MeetingDetailPage({ params }: { params: { id: string } }
                     onPromptChange={setCustomPrompt}
                     onTranscriptUpdate={meetingData.setTranscripts}
                     onRecordingStateChange={setIsRecording}
-                    onRefreshTranscripts={async () => { await fetchMeetingDetails(); }}
+                    onRefreshTranscripts={handleRefreshTranscripts}
                 />
 
                 <SummaryPanel

@@ -35,7 +35,7 @@ export function LiveTranscriptPanel({
 }: LiveTranscriptPanelProps) {
     const [transcripts, setTranscripts] = useState<Transcript[]>([]);
     const [isConnected, setIsConnected] = useState(false);
-    const bottomRef = useRef<HTMLDivElement>(null);
+    const scrollRef = useRef<HTMLDivElement>(null);
 
     // WebSocket Effect
     useEffect(() => {
@@ -114,8 +114,12 @@ export function LiveTranscriptPanel({
 
     // Auto-scroll when new transcripts arrive
     useEffect(() => {
-        if (bottomRef.current) {
-            bottomRef.current.scrollIntoView({ behavior: 'smooth' });
+        if (scrollRef.current) {
+            const scrollContainer = scrollRef.current;
+            scrollContainer.scrollTo({
+                top: scrollContainer.scrollHeight,
+                behavior: 'smooth'
+            });
         }
     }, [transcripts]);
 
@@ -153,7 +157,7 @@ export function LiveTranscriptPanel({
             )}
 
             {/* Stream Content Area */}
-            <div className="flex-1 overflow-y-auto px-4 py-4 space-y-6 relative scroll-smooth">
+            <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-6 relative scroll-smooth">
                 {transcripts.length === 0 ? (
                     <div className="h-full flex flex-col items-center justify-center text-gray-400">
                         {isRecording ? (
@@ -197,7 +201,7 @@ export function LiveTranscriptPanel({
                                 );
                             })}
                         </AnimatePresence>
-                        <div ref={bottomRef} />
+
                     </div>
                 )}
             </div>

@@ -74,7 +74,9 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# Whisper.cpp server configuration
+# Whisper/STT server configuration
+# Set WHISPER_SERVER_URL env var to point to your STT server
+# Default: local whisper service (run whisper/service.py)
 WHISPER_SERVER_URL = os.getenv("WHISPER_SERVER_URL", "http://localhost:8178")
 
 async def process_audio_chunk(audio_data: bytes, meeting_id: str, diarize: bool = True):
@@ -83,17 +85,17 @@ async def process_audio_chunk(audio_data: bytes, meeting_id: str, diarize: bool 
     Returns transcript text or None if error
     """
     try:
-        # Call Whisper.cpp API
+        # Call Whisper STT API (OpenAI-compatible endpoint)
         async with httpx.AsyncClient(timeout=60.0) as client:  # Increased to 60s
             files = {"file": ("audio.wav", audio_data, "audio/wav")}
             response = await client.post(
-                f"{WHISPER_SERVER_URL}/inference",
+                f"{WHISPER_SERVER_URL}/v1/audio/transcriptions",
                 files=files,
                 data={
-                    "temperature": "0.0",
-                    "temperature_inc": "0.2",
-                    "response_format": "json",
-                    "diarize": str(diarize).lower() # Pass flag
+                    "model": "whisper-1",
+                    "response_format": "verbose_json",  # Get segments with speaker info
+                    "diarization": "false",  # Live mode - fast, no speaker labels
+                    "temperature": 0.0
                 }
             )
             
@@ -397,24 +399,80 @@ async def process_full_meeting_and_broadcast(audio_data: bytes, meeting_id: str,
 
         async with httpx.AsyncClient(timeout=300.0) as client: # 5 mins timeout
             files = {"file": (filename, wav_data, "audio/wav")}
+            
+            # Use standard OpenAI-compatible endpoint (tested and working)
             response = await client.post(
-                f"{WHISPER_SERVER_URL}/process_full_meeting", # Use restored FULL PIPELINE endpoint
-                files=files
+                f"{WHISPER_SERVER_URL}/v1/audio/transcriptions",
+                files=files,
+                data={
+                    "model": "whisper-1",
+                    "response_format": "verbose_json",
+                    "diarization": "true",  # Enable speaker labels for full meeting
+                    "temperature": 0.0
+                }
             )
             
             if response.status_code == 200:
                 data = response.json()
-                transcripts = data.get("transcripts", [])
+                # Response format: {"text": "...", "segments": [...], "language": "vi"}
+                # Convert to expected format
+                segments = data.get("segments", [])
+                transcripts = []
+                for seg in segments:
+                    transcripts.append({
+                        "text": seg.get("text", ""),
+                        "speaker": seg.get("speaker", "SPEAKER_00"),
+                        "start": seg.get("start", 0.0),
+                        "end": seg.get("end", 0.0)
+                    })
                 print(f"✅ Full Pipeline Success! Got {len(transcripts)} segments.")
+                
+                # Calculate meeting duration
+                # Option 1: Get from API response (if available)
+                duration = data.get("duration")
+                # Option 2: Calculate from segments (fallback)
+                if duration is None and transcripts:
+                    duration = max(seg["end"] for seg in transcripts)
+                
+                print(f"📏 Meeting duration: {duration:.2f}s" if duration else "⚠️ Duration not available")
                 
                 # DB Connection
                 import sqlite3
                 import uuid
+                from pathlib import Path
                 from .database import get_db_path
                 
                 try:
                     conn = sqlite3.connect(get_db_path())
                     cursor = conn.cursor()
+                    
+                    # Create audio storage directory path
+                    # Use backend/audio_recordings/ directory
+                    backend_dir = Path(__file__).parent.parent
+                    audio_storage_dir = backend_dir / "audio_recordings"
+                    audio_storage_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    # NEW: Save audio file to disk
+                    audio_filename = f"{meeting_id}.wav"
+                    audio_path = audio_storage_dir / audio_filename
+                    
+                    try:
+                        # Save WAV file
+                        with open(audio_path, 'wb') as f:
+                            f.write(wav_data)
+                        print(f"💾 Saved audio file: {audio_path.name} ({len(wav_data)} bytes)")
+                        
+                        # Update meeting with audio_file_path AND duration
+                        cursor.execute(
+                            "UPDATE meetings SET audio_file_path = ?, duration = ? WHERE id = ?",
+                            (str(audio_path), duration, meeting_id)
+                        )
+                        conn.commit()
+                        print(f"✅ Updated meeting {meeting_id} with audio_file_path and duration")
+                        
+                    except Exception as audio_err:
+                        print(f"⚠️ Failed to save audio file: {audio_err}")
+                        # Continue with transcripts even if audio save fails
                     
                     # Process and Broadcast
                     for item in transcripts:

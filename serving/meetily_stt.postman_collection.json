@@ -1,0 +1,101 @@
+{
+    "info": {
+        "_postman_id": "b6a8d7e4-1234-4567-8901-abcdef123456",
+        "name": "Meetily STT Service",
+        "description": "Collection to test Zipformer STT & Diarization Service running on Docker (Port 2202)",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "item": [
+        {
+            "name": "Transcribe Audio (Final Mode - With Diarization)",
+            "request": {
+                "method": "POST",
+                "header": [],
+                "body": {
+                    "mode": "formdata",
+                    "formdata": [
+                        {
+                            "key": "file",
+                            "description": "Upload audio file here",
+                            "type": "file",
+                            "src": []
+                        },
+                        {
+                            "key": "model",
+                            "value": "whisper-1",
+                            "type": "text"
+                        },
+                        {
+                            "key": "response_format",
+                            "value": "verbose_json",
+                            "type": "text"
+                        },
+                        {
+                            "key": "diarization",
+                            "value": "true",
+                            "description": "Enable speaker diarization",
+                            "type": "text"
+                        },
+                        {
+                            "key": "diarization_threshold",
+                            "value": "0.30",
+                            "description": "Clustering threshold (0.2 - 0.5)",
+                            "type": "text"
+                        },
+                        {
+                            "key": "diarization_window_ms",
+                            "value": "2000",
+                            "description": "Scanning window in ms",
+                            "type": "text"
+                        }
+                    ]
+                },
+                "url": {
+                    "raw": "http://localhost:2202/v1/audio/transcriptions",
+                    "protocol": "http",
+                    "host": [
+                        "localhost"
+                    ],
+                    "port": "2202",
+                    "path": [
+                        "v1",
+                        "audio",
+                        "transcriptions"
+                    ]
+                },
+                "description": "Process full audio to get transcript with speaker labels."
+            },
+            "response": []
+        },
+        {
+            "name": "Process Full Meeting (Legacy Endpoint)",
+            "request": {
+                "method": "POST",
+                "header": [],
+                "body": {
+                    "mode": "formdata",
+                    "formdata": [
+                        {
+                            "key": "file",
+                            "type": "file",
+                            "src": []
+                        }
+                    ]
+                },
+                "url": {
+                    "raw": "http://localhost:2202/process_full_meeting",
+                    "protocol": "http",
+                    "host": [
+                        "localhost"
+                    ],
+                    "port": "2202",
+                    "path": [
+                        "process_full_meeting"
+                    ]
+                },
+                "description": "Legacy endpoint strictly for full meeting processing (no tuning params)."
+            },
+            "response": []
+        }
+    ]
+}

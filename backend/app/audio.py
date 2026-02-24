@@ -12,7 +12,8 @@ import json
 
 router = APIRouter()
 
-# Whisper.cpp server URL
+# STT server URL — set WHISPER_SERVER_URL env var to override
+# Default: local whisper service (run whisper/service.py first)
 WHISPER_SERVER_URL = os.getenv("WHISPER_SERVER_URL", "http://localhost:8178")
 
 @router.post("/upload")
@@ -31,13 +32,18 @@ async def upload_audio(
             temp_file.write(content)
             temp_path = temp_file.name
 
-        # Send to Whisper.cpp server
+        # Send to Whisper STT server (OpenAI-compatible endpoint)
         async with httpx.AsyncClient(timeout=60.0) as client:
             with open(temp_path, "rb") as f:
                 response = await client.post(
-                    f"{WHISPER_SERVER_URL}/inference",
+                    f"{WHISPER_SERVER_URL}/v1/audio/transcriptions",
                     files={"file": f},
-                    data={"language": "vi"}  # Vietnamese
+                    data={
+                        "model": "whisper-1",
+                        "response_format": "verbose_json",
+                        "diarization": "true",  # Full upload - high quality with speakers
+                        "temperature": 0.0
+                    }
                 )
 
         # Cleanup
@@ -77,13 +83,18 @@ async def upload_chunk(
             temp_file.write(content)
             temp_path = temp_file.name
 
-        # Send to Whisper for transcription
+        # Send to Whisper for transcription (fast mode for chunks)
         async with httpx.AsyncClient(timeout=30.0) as client:
             with open(temp_path, "rb") as f:
                 response = await client.post(
-                    f"{WHISPER_SERVER_URL}/inference",
+                    f"{WHISPER_SERVER_URL}/v1/audio/transcriptions",
                     files={"file": f},
-                    data={"language": "vi"}
+                    data={
+                        "model": "whisper-1",
+                        "response_format": "verbose_json",
+                        "diarization": "false",  # Chunk mode - fast, no speaker labels
+                        "temperature": 0.0
+                    }
                 )
 
         # Cleanup
@@ -154,13 +165,18 @@ async def transcribe_audio(file: UploadFile = File(...)):
             temp_file.write(content)
             temp_path = temp_file.name
 
-        # Call Whisper.cpp
+        # Call Whisper STT (simple transcription)
         async with httpx.AsyncClient(timeout=60.0) as client:
             with open(temp_path, "rb") as f:
                 response = await client.post(
-                    f"{WHISPER_SERVER_URL}/inference",
+                    f"{WHISPER_SERVER_URL}/v1/audio/transcriptions",
                     files={"file": f},
-                    data={"language": "vi"}
+                    data={
+                        "model": "whisper-1",
+                        "response_format": "verbose_json",
+                        "diarization": "false",  # Simple mode - just transcription
+                        "temperature": 0.0
+                    }
                 )
 
         # Cleanup

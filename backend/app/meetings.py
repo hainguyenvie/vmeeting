@@ -30,6 +30,7 @@ class Meeting(BaseModel):
     created_at: int
     duration: Optional[float] = None
     summary: Optional[str] = None
+    html_summary: Optional[str] = None
 
 @router.get("/get-meetings", response_model=List[Meeting])
 async def get_meetings():

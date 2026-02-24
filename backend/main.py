@@ -32,6 +32,9 @@ from app import audio, diarization, websocket_routes, meetings, transcripts
 # Include routers
 app.include_router(audio.router, prefix="/api/audio", tags=["Audio"])
 app.include_router(diarization.router, prefix="/api/diarization", tags=["Diarization"])
+
+# Fix 404: Support /notion-meeting prefix for WebSocket connections
+app.include_router(websocket_routes.router, prefix="/notion-meeting", tags=["WebSocket (Proxy)"])
 app.include_router(websocket_routes.router, tags=["WebSocket"])
 app.include_router(meetings.router, tags=["Meetings"])
 app.include_router(transcripts.router, tags=["Transcripts"])

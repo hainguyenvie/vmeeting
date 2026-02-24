@@ -1,0 +1,10 @@
+
+# In case you are missing tokens.txt on the server:
+# You can copy the 'tokens.txt' provided in this serving folder to your models/zipformer directory.
+# Or if you are on the server and cannot copy files easily, you can create it manually:
+
+# 1. Be inside serving/models/zipformer/
+# 2. Run:
+#    mv ../path/to/tokens.txt . 
+#    OR if you have bpe.model but no tokens.txt, you might need to export it (advanced).
+#    Best way: Just copy the tokens.txt file included in this package!

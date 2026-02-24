@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  speech-to-text:
+    container_name: zipformer_stt_hainh67
+    build: .
+    ports:
+      - "2202:2202"
+    volumes:
+      - ./models:/app/models
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1

@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+numpy
+soundfile
+scipy
+base64
+python-multipart
+websockets
+sherpa_onnx
+librosa

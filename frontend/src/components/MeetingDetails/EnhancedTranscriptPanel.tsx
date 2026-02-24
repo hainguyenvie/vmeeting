@@ -134,7 +134,8 @@ export function EnhancedTranscriptPanel({
             }, 2000); // 2s delay to be safe
             return () => clearTimeout(timer);
         }
-    }, [isRecording, onRefreshTranscripts]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isRecording]); // ✅ FIX: Removed onRefreshTranscripts to prevent infinite loop
 
     const getSpeakerColor = (speaker?: string) => {
         if (!speaker) return 'bg-gray-400';

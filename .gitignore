@@ -21,6 +21,7 @@ env/
 whisper/models/
 backend/meeting_minutes.db
 backend/uploaded_files/
+backend/audio_recordings/
 *.log
 
 # Environment
@@ -31,3 +32,19 @@ backend/uploaded_files/
 # OS
 .DS_Store
 Thumbs.db
+
+# Binary / Archive files (do not commit large binaries)
+*.zip
+*.tar.gz
+*.rar
+
+# Sensitive / API Tokens
+serving/tokens.txt
+
+# Temp / Test data
+1.json
+
+# Analysis docs (not part of core codebase)
+LLM_Comparison_Table.html
+LLM_MODEL_COMPARISON_ANALYSIS.md
+DIARIZATION_FIRST_ANALYSIS.md
