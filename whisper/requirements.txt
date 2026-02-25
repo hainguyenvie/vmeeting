@@ -7,3 +7,7 @@ python-multipart
 websockets
 sherpa_onnx
 librosa
+torch
+torchaudio
+transformers
+noisereduce
