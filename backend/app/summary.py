@@ -21,7 +21,6 @@ VIETTEL_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1")  # Def
 VIETTEL_API_KEY = os.getenv("LLM_API_KEY", "not-needed")                  # Required: set in .env
 VIETTEL_DEFAULT_MODEL = os.getenv("LLM_MODEL", "qwen2.5:72b")             # Default: local model
 
-# FIXED TEMPLATE PATH - Only one template is used
 TEMPLATE_FILE = Path("app/templates/bien_ban_hop_vn.json")
 print(f"📋 Using fixed template: {TEMPLATE_FILE}")
 
@@ -138,16 +137,11 @@ def markdown_to_html(markdown_text: str, metadata: Optional[Dict[str, Any]] = No
     Minimalist style matching standard document editors.
     """
     import re
-    from datetime import datetime
     
-    # Extract metadata
-    meeting_title = metadata.get('meeting_title', 'Biên bản họp') if metadata else 'Biên bản họp'
-    date = metadata.get('date', datetime.now().strftime('%d/%m/%Y')) if metadata else datetime.now().strftime('%d/%m/%Y')
-    
-    # Start with Title and Metadata as simple HTML blocks
-    html = f"<h1>{meeting_title}</h1>"
-    html += f"<p><strong>Thời gian:</strong> {date}</p>"
-    html += "<p>---</p>"
+    # We remove the hardcoded meeting_title and date injection here
+    # because the LLM already generates "Thông tin chung" including "Thời gian"
+    # in the markdown based on the template. Prepending it again creates duplicates.
+    html = ""
     
     # Helper to parse inline formatting
     def format_inline(text: str) -> str:
@@ -163,6 +157,7 @@ def markdown_to_html(markdown_text: str, metadata: Optional[Dict[str, Any]] = No
     lines = markdown_text.split('\n')
     in_table = False
     in_list = False
+    in_ordered_list = False
     
     for line in lines:
         stripped = line.strip()
@@ -175,29 +170,45 @@ def markdown_to_html(markdown_text: str, metadata: Optional[Dict[str, Any]] = No
             elif in_list:
                 html += '</ul>'
                 in_list = False
+            elif in_ordered_list:
+                html += '</ol>'
+                in_ordered_list = False
             continue
         
-        # Headers (H2)
-        if stripped.startswith('## '):
+        # Headers (H1, H2, H3)
+        header_match = re.match(r'^(#{1,3})\s+(.*)', stripped)
+        if header_match:
             if in_table:
                 html += '</tbody></table>'
                 in_table = False
             if in_list:
                 html += '</ul>'
                 in_list = False
-            title = stripped[3:].strip()
+            if in_ordered_list:
+                html += '</ol>'
+                in_ordered_list = False
+                
+            level = len(header_match.group(1))
+            title = header_match.group(2).strip()
             title = format_inline(title)
-            html += f'<h2>{title}</h2>'
+            html += f'<h{level}>{title}</h{level}>'
+            continue
         
         # Tables
-        elif stripped.startswith('|'):
+        if stripped.startswith('|'):
             if in_list:
                 html += '</ul>'
                 in_list = False
+            if in_ordered_list:
+                html += '</ol>'
+                in_ordered_list = False
             
             cells = [c.strip() for c in stripped.split('|')[1:-1]]
             
-            if all(set(c) <= {'-', ':', ' '} for c in cells):
+            if not cells:
+                continue
+                
+            if all(set(c) <= {'-', ':', ' '} for c in cells if c):
                 continue
             
             if not in_table:
@@ -212,35 +223,61 @@ def markdown_to_html(markdown_text: str, metadata: Optional[Dict[str, Any]] = No
                 for cell in cells:
                     html += f'<td>{format_inline(cell)}</td>'
                 html += '</tr>'
+            continue
         
         # Bullet Lists
-        elif stripped.startswith('- '):
+        if stripped.startswith('- ') or stripped == '-':
             if in_table:
                 html += '</tbody></table>'
                 in_table = False
+            if in_ordered_list:
+                html += '</ol>'
+                in_ordered_list = False
             if not in_list:
                 html += '<ul>'
                 in_list = True
             
-            text = stripped[2:].strip()
+            text = stripped[2:].strip() if stripped.startswith('- ') else ""
             html += f'<li>{format_inline(text)}</li>'
-        
-        # Paragraphs
-        else:
+            continue
+            
+        # Ordered Lists
+        ordered_match = re.match(r'^\d+\.\s+(.*)', stripped)
+        if ordered_match:
             if in_table:
                 html += '</tbody></table>'
                 in_table = False
             if in_list:
                 html += '</ul>'
                 in_list = False
+            if not in_ordered_list:
+                html += '<ol>'
+                in_ordered_list = True
+                
+            text = ordered_match.group(1).strip()
+            html += f'<li>{format_inline(text)}</li>'
+            continue
+        
+        # Paragraphs
+        if in_table:
+            html += '</tbody></table>'
+            in_table = False
+        if in_list:
+            html += '</ul>'
+            in_list = False
+        if in_ordered_list:
+            html += '</ol>'
+            in_ordered_list = False
             
-            html += f'<p>{format_inline(stripped)}</p>'
+        html += f'<p>{format_inline(stripped)}</p>'
     
     # Close any open tags at end
     if in_table:
         html += '</tbody></table>'
     if in_list:
         html += '</ul>'
+    if in_ordered_list:
+        html += '</ol>'
     
     return html
 
