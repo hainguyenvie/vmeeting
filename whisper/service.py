@@ -1,5 +1,13 @@
 import os
 import sys
+
+# ==========================================
+# OFFLINE MODE - Chạy hoàn toàn local, không download
+# ==========================================
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_DATASETS_OFFLINE"] = "1"
+
 import glob
 import time
 import io
@@ -156,8 +164,12 @@ class MoonshineEngine:
     MIN_SPEECH_SEC     = 0.5     # speech segment ngắn hơn → bỏ qua
     VAD_MERGE_GAP_SEC  = 0.3     # merge 2 speech segments cách nhau < 0.3s
 
-    def __init__(self, model_id="UsefulSensors/moonshine-base-vi"):
-        self.model_id    = model_id
+    def __init__(self, model_id=None):
+        if model_id is None:
+            import os
+            self.model_id = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "moonshine-base-vi")
+        else:
+            self.model_id = model_id
         self.processor   = None
         self.model       = None
         self.vad_model   = None    # Silero VAD
@@ -174,21 +186,25 @@ class MoonshineEngine:
         print(f"🚀 Loading Moonshine + Silero VAD on {self.device.upper()} ({self.torch_dtype})...")
         from transformers import AutoProcessor, MoonshineForConditionalGeneration
 
-        # 1. Moonshine ASR model (theo model card chính thức)
-        self.processor = AutoProcessor.from_pretrained(self.model_id)
+        # 1. Moonshine ASR model (theo model card chính thức) - OFFLINE MODE
+        self.processor = AutoProcessor.from_pretrained(self.model_id, local_files_only=True)
         self.model = MoonshineForConditionalGeneration.from_pretrained(
             self.model_id,
             torch_dtype=self.torch_dtype,
             low_cpu_mem_usage=True,
+            local_files_only=True,
         ).to(self.device)
         self.model.eval()
 
-        # 2. Silero VAD (torch.hub — tự cache, không cần cài thêm)
+        # 2. Silero VAD (Loaded from local copy)
         print("  📡 Loading Silero VAD...")
         try:
+            vad_local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "silero-vad")
+            
             self.vad_model, self.vad_utils = torch.hub.load(
-                repo_or_dir="snakers4/silero-vad",
+                repo_or_dir=vad_local_path,
                 model="silero_vad",
+                source="local",
                 force_reload=False,
                 trust_repo=True,
             )
@@ -712,10 +728,9 @@ def get_pyannote_pipeline():
         print("🚀 Loading Pyannote 3.1 Pipeline on CUDA...")
         from pyannote.audio import Pipeline
         import torch
-        pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            token="YOUR_HF_TOKEN_HERE"
-        )
+        import os
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "pyannote", "speaker-diarization-3.1", "config.yaml")
+        pipeline = Pipeline.from_pretrained(config_path)
         if torch.cuda.is_available():
             pipeline.to(torch.device("cuda"))
             
