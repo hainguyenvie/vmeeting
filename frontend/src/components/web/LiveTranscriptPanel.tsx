@@ -53,21 +53,43 @@ export function LiveTranscriptPanel({
                 const data = JSON.parse(event.data);
                 console.log('WS Message:', data);
 
-                // Handle 'live_transcript' (intermediate/VAD) - ONLY for local display
+                // Handle 'live_transcript' streaming updates
                 if (data.type === 'live_transcript') {
-                    const liveTranscript: Transcript = {
+                    const liveTranscript: Transcript & { index?: number } = {
                         transcript: data.transcript,
                         timestamp: data.timestamp,
                         speaker: data.speaker,
                         meeting_id: data.meeting_id,
-                        is_final: false,
+                        is_final: data.is_completed,
+                        index: data.index
                     };
 
-                    // Add to local state ONLY (not passed to parent)
-                    setTranscripts(prev => [...prev, liveTranscript]);
+                    setTranscripts((prev) => {
+
+                        const arr = [...prev];
+                        if (arr.length > 0) {
+                            const last = arr[arr.length - 1];
+                            
+                            // 1. If the last transcript is NOT final, we must update it (it's currently being spoken)
+                            if (!last.is_final) {
+                                // If the speaker changed mid-sentence (rare but possible), still update the text but keep the new speaker
+                                arr[arr.length - 1] = liveTranscript;
+                                return arr;
+                            }
+                            
+                            // 2. If the last transcript IS final, but the NEW transcript is from the SAME speaker,
+                            // we might want to append it to the same visual block instead of creating a new one every 5 seconds.
+                            // However, Moonshine handles segmentation. Let's append to the same visual line if it's the same speaker
+                            // to avoid the "fragmented" look. Wait, actually, let's keep them separate but visually group them in the UI.
+                            // For the data structure, we should just append it as a new line since it's a new segment.
+                        }
+                        // It's a new segment or first segment
+                        return [...arr, liveTranscript];
+                    });
+
                 }
 
-                // Handle 'transcript' (final/DB) - Pass to parent for Saved Transcripts
+                // Fallback for direct 'transcript' messages if backend still sends them
                 else if (data.type === 'transcript') {
                     const finalTranscript: Transcript = {
                         transcript: data.transcript,
@@ -77,8 +99,6 @@ export function LiveTranscriptPanel({
                         is_final: true,
                     };
 
-                    // DO NOT add to local state (live panel should not show final transcripts)
-                    // ONLY notify parent to update "Saved Transcripts"
                     if (onTranscriptReceived) {
                         onTranscriptReceived({
                             ...finalTranscript,
@@ -171,7 +191,7 @@ export function LiveTranscriptPanel({
                         <AnimatePresence initial={false}>
                             {transcripts.map((item, index) => {
                                 const isLatest = index === transcripts.length - 1;
-                                const uniqueKey = `${item.timestamp}-${index}`;
+                                const uniqueKey = `transcript-${index}`;
                                 return (
                                     <motion.div
                                         key={uniqueKey}
@@ -185,11 +205,6 @@ export function LiveTranscriptPanel({
                                         className={`origin-left mb-4 ${isLatest ? 'mb-8' : ''}`}
                                     >
                                         <div className="flex items-baseline gap-3">
-                                            <span className={`text-xs font-bold uppercase tracking-wider flex-shrink-0 w-16 text-right
-                                                ${isLatest ? 'text-blue-600' : 'text-gray-400'}
-                                             `}>
-                                                {item.speaker ? item.speaker.replace('SPEAKER_', 'Spk ') : '...'}
-                                            </span>
                                             <p className={`
                                                 font-medium leading-relaxed transition-all duration-500
                                                 ${isLatest ? 'text-xl text-gray-900' : 'text-base text-gray-500'}

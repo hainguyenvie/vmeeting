@@ -45,14 +45,14 @@ export function useAudioRecorder() {
      */
     const startRecording = useCallback(async (options: AudioRecorderOptions) => {
         try {
-            // Request microphone permission
+            // Request microphone permission - Disable all processing for raw audio like Python sounddevice
             mediaStream.current = await navigator.mediaDevices.getUserMedia({
                 audio: {
                     channelCount: options.channelCount || 1,
                     sampleRate: options.sampleRate || 16000,
-                    echoCancellation: true,
-                    noiseSuppression: true,
-                    autoGainControl: true,
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    autoGainControl: false,
                 },
             });
 
@@ -81,8 +81,8 @@ export function useAudioRecorder() {
             // Buffer to hold audio samples until we have enough to send
             let chunks: Float32Array[] = [];
             let totalLength = 0;
-            const CHUNK_DURATION_MS = 500; // Send every 0.5s (FAST DRAFT)
-            const SAMPLES_PER_CHUNK = sampleRate * (CHUNK_DURATION_MS / 1000);
+            const CHUNK_DURATION_MS = 250; // Match ~4096 frames at 16kHz for smoother C++ inference
+            const SAMPLES_PER_CHUNK = Math.floor(sampleRate * (CHUNK_DURATION_MS / 1000));
 
             processor.onaudioprocess = (e) => {
                 if (!mediaStream.current || !wsRef.current) return;

@@ -18,7 +18,7 @@ from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 # 1. SETUP & UTILS
 # ==========================================
 
-app = FastAPI(title="Meetily STT Server (Zipformer Only)")
+app = FastAPI(title="Meetily STT Server (Moonshine Only)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -133,177 +133,6 @@ def enhance_audio_for_asr(audio: np.ndarray, sr: int = 16000) -> np.ndarray:
     return audio.astype(np.float32)
 
 
-class ZipformerEngine:
-    def __init__(self):
-        self.recognizer = None
-        self.loaded = False
-        
-    def get_model_path(self):
-        # 1. Look in local 'models' folder first (Portable Mode)
-        if os.path.exists("models/zipformer"):
-            return "models/zipformer"
-        if os.path.exists("../models/zipformer"):
-            return "../models/zipformer"
-
-        # 2. Look in AppData (Installed Mode)
-        appdata = os.getenv('APPDATA')
-        if appdata:
-            base_path = os.path.join(appdata, "com.meetily.ai", "models", "zipformer")
-            if os.path.exists(base_path): return base_path
-            
-        # Raise if not found
-        # Ideally we might auto-download here but let's keep it simple
-        raise FileNotFoundError(f"Zipformer model not found. Checked ./models and AppData.")
-            
-    def load(self):
-        if self.loaded: return
-        print("🚀 Loading Zipformer 70k (Sherpa-ONNX)...")
-        
-        import sherpa_onnx
-        
-        try:
-            model_dir = self.get_model_path()
-            print(f"📂 Model dir: {model_dir}")
-            
-            # Find files (sometimes names carry epoch numbers which change)
-            encoder = glob.glob(os.path.join(model_dir, "encoder*.onnx"))[0]
-            decoder = glob.glob(os.path.join(model_dir, "decoder*.onnx"))[0]
-            joiner = glob.glob(os.path.join(model_dir, "joiner*.onnx"))[0]
-            tokens = os.path.join(model_dir, "tokens.txt") 
-            
-            print(f"  - Encoder: {os.path.basename(encoder)}")
-            
-            # Try loading with CUDA first
-            try:
-                print("  - Attempting to load with provider='cuda'...")
-                self.recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
-                    encoder=encoder,
-                    decoder=decoder,
-                    joiner=joiner,
-                    tokens=tokens,
-                    num_threads=4,
-                    sample_rate=16000,
-                    feature_dim=80,
-                    decoding_method="greedy_search",
-                    provider="cuda"
-                )
-                print("✅ Zipformer Loaded on CUDA")
-            except Exception as e_cuda:
-                print(f"⚠️ Failed to load on CUDA: {e_cuda}")
-                print("  - Falling back to provider='cpu'...")
-                self.recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
-                    encoder=encoder,
-                    decoder=decoder,
-                    joiner=joiner,
-                    tokens=tokens,
-                    num_threads=4,
-                    sample_rate=16000,
-                    feature_dim=80,
-                    decoding_method="greedy_search",
-                    provider="cpu"
-                )
-                print("✅ Zipformer Loaded on CPU")
-            
-            self.loaded = True
-            
-        except Exception as e:
-            print(f"❌ Failed to load Zipformer: {e}")
-            raise e
-
-    def _check_cuda(self):
-        return True 
-
-    def unload(self):
-        if self.loaded:
-            print("🛑 Unloading Zipformer...")
-            del self.recognizer
-            import gc
-            gc.collect()
-            self.loaded = False
-
-    def transcribe(self, audio_data: io.BytesIO):
-        if not self.loaded: self.load()
-        
-        start = time.time()
-        
-        # Load audio robustly
-        audio, sample_rate = load_audio_robust(audio_data)
-        
-        if len(audio.shape) > 1:
-            audio = audio.mean(axis=1)
-            
-        if sample_rate != 16000:
-            import librosa
-            audio = librosa.resample(audio, orig_sr=sample_rate, target_sr=16000)
-
-        # Inference
-        stream = self.recognizer.create_stream()
-        stream.accept_waveform(16000, audio)
-        self.recognizer.decode_stream(stream)
-        
-        text = stream.result.text.strip()
-        
-        # Extract segments using timestamps if available
-        segments = []
-        try:
-            # Check if timestamps are available
-            if hasattr(stream.result, 'timestamps') and hasattr(stream.result, 'tokens'):
-                timestamps = stream.result.timestamps
-                tokens = stream.result.tokens
-                
-                if timestamps and len(timestamps) == len(tokens):
-                    current_seg_start = timestamps[0]
-                    current_seg_tokens = []
-                    last_end = timestamps[0]
-                    
-                    for i, t in enumerate(timestamps):
-                        gap = t - last_end
-                        current_dur = t - current_seg_start
-                        should_split = False
-                        
-                        if gap > 0.35: should_split = True
-                        elif current_dur > 2.5 and gap > 0.15: should_split = True
-                        elif current_dur > 7.0 and gap > 0.05: should_split = True
-                            
-                        if should_split:
-                             segment_text = "".join(current_seg_tokens).replace(" ", " ").strip()
-                             if segment_text:
-                                 segments.append({
-                                     "start": current_seg_start,
-                                     "end": last_end + 0.1,
-                                     "text": segment_text
-                                 })
-                             current_seg_start = t
-                             current_seg_tokens = []
-                        
-                        current_seg_tokens.append(tokens[i])
-                        last_end = t
-                    
-                    segment_text = "".join(current_seg_tokens).replace(" ", " ").strip()
-                    if segment_text:
-                        segments.append({
-                             "start": current_seg_start,
-                             "end": last_end + 0.1,
-                             "text": segment_text
-                        })
-                        
-        except Exception as e:
-            print(f"⚠️ Failed to extract timestamps from Zipformer: {e}")
-            
-        # Fallback if no segments created
-        if not segments:
-            duration_sec = len(audio) / 16000.0
-            segments = [{"start": 0.0, "end": duration_sec, "text": text}]
-        
-        elapsed = (time.time() - start) * 1000
-        
-        return {
-            "text": text,
-            "segments": segments, 
-            "total_ms": round(elapsed, 1), 
-            "device": "sherpa-onnx", 
-            "model": "Zipformer-70k"
-        }
 
 class MoonshineEngine:
     """
@@ -625,13 +454,11 @@ class MoonshineEngine:
 
 # Zipformer and Moonshine engine
 engines = {
-    "zipformer": ZipformerEngine(),
-    "moonshine": MoonshineEngine(),
-    "phowhisper": ZipformerEngine() # map phowhisper to zipformer just in case client requests it
+    "moonshine": MoonshineEngine()
 }
 
 # Default model
-current_model_id = "zipformer"
+current_model_id = "moonshine"
 
 @app.on_event("startup")
 async def startup():
@@ -645,12 +472,12 @@ async def startup():
 @app.post("/switch_model")
 async def switch_model(model_id: str):
     global current_model_id
-    # Always use zipformer regardless of what is requested, or support aliases
-    return {"status": "ok", "current_model": "zipformer"}
+    # Always use moonshine regardless of what is requested now
+    return {"status": "ok", "current_model": "moonshine"}
 
 @app.get("/current_model")
 async def get_current_model():
-    return {"current_model": "zipformer"}
+    return {"current_model": "moonshine"}
 
 class SpeakerManager:
     def __init__(self, model_path=None, threshold=0.45): 
@@ -793,10 +620,10 @@ async def inference(
         audio_data = await file.read()
         audio_file = io.BytesIO(audio_data)
         
-        # 1. Transcription - ALWAYS ZIPFORMER
-        engine = engines["zipformer"]
+        # 1. Transcription - ALWAYS MOONSHINE
+        engine = engines["moonshine"]
         result = engine.transcribe(audio_file)
-        text = result['text']
+        text = result.get('text', '')
         
         if not text:
             return result 
@@ -1017,34 +844,27 @@ async def run_diarize_first_pipeline(audio_bytes, speaker_mgr, stt_engine):
         e_idx = min(len(audio), int((end + e_pad) * 16000))
         seg_audio = audio[s_idx:e_idx]
         
-        # Check engine type (Moonshine or Zipformer)
-        if hasattr(stt_engine, "_transcribe_segment"):
-            # MoonshineEngine has a strict max 30s limit to avoid context truncation (losing audio tail).
-            duration_seg = len(seg_audio) / 16000.0
-            if hasattr(stt_engine, "_get_speech_segments") and duration_seg > 29.0:
-                print(f"  ✂️ Segment too long ({duration_seg:.1f}s), splitting using VAD...")
-                # Use Moonshine's built-in VAD packer to safely break > 29s blocks at quiet points
-                sub_chunks = stt_engine._get_speech_segments(seg_audio, duration_seg)
-                chunk_texts = []
-                for sub in sub_chunks:
-                    ss_idx = int(sub["start"] * 16000)
-                    ee_idx = int(sub["end"] * 16000)
-                    sub_audio = seg_audio[ss_idx:ee_idx]
-                    if len(sub_audio) / 16000.0 < 0.2: 
-                        continue
-                    ctext = stt_engine._transcribe_segment(sub_audio)
-                    if ctext:
-                        chunk_texts.append(ctext)
-                text = " ".join(chunk_texts)
-            else:
-                text = stt_engine._transcribe_segment(seg_audio)
-                
-        elif hasattr(stt_engine, "recognizer"):
-            # ZipformerEngine
-            s = stt_engine.recognizer.create_stream()
-            s.accept_waveform(16000, seg_audio)
-            stt_engine.recognizer.decode_stream(s)
-            text = s.result.text.strip()
+        # Process with MoonshineEngine
+        # MoonshineEngine has a strict max 30s limit to avoid context truncation (losing audio tail).
+        duration_seg = len(seg_audio) / 16000.0
+        
+        if hasattr(stt_engine, "_get_speech_segments") and duration_seg > 29.0:
+            print(f"  ✂️ Segment too long ({duration_seg:.1f}s), splitting using VAD...")
+            # Use Moonshine's built-in VAD packer to safely break > 29s blocks at quiet points
+            sub_chunks = stt_engine._get_speech_segments(seg_audio, duration_seg)
+            chunk_texts = []
+            for sub in sub_chunks:
+                ss_idx = int(sub["start"] * 16000)
+                ee_idx = int(sub["end"] * 16000)
+                sub_audio = seg_audio[ss_idx:ee_idx]
+                if len(sub_audio) / 16000.0 < 0.2: 
+                    continue
+                ctext = stt_engine._transcribe_segment(sub_audio)
+                if ctext:
+                    chunk_texts.append(ctext)
+            text = " ".join(chunk_texts)
+        elif hasattr(stt_engine, "_transcribe_segment"):
+            text = stt_engine._transcribe_segment(seg_audio)
         else:
             text = "***"
             
@@ -1117,12 +937,12 @@ async def openai_transcriptions(
         audio_file = io.BytesIO(audio_data)
         
         # Choose engine based on request
-        # 'diarization' flag true -> this is a full meeting process or final chunk (so use moonshine)
-        # 'diarization' flag false -> this is a live processing short chunk (so use zipformer)
+        # 'diarization' flag true -> this is a full meeting process or final chunk (so use moonshine + pyannote)
+        # 'diarization' flag false -> standard Moonshine transcription
+        engine = engines["moonshine"]
+        if not engine.loaded: engine.load()
+
         if diarization.lower() == "true":
-            engine = engines["moonshine"]
-            if not engine.loaded: engine.load()
-            
             # Using new optimized diarization-first pipeline
             if not speaker_manager.loaded: speaker_manager.load()
             segments = await run_diarize_first_pipeline(audio_data, speaker_manager, engine)
@@ -1134,12 +954,9 @@ async def openai_transcriptions(
                 "model": "moonshine-diarized"
             }
         else:
-            engine = engines["zipformer"]
-            if not engine.loaded: engine.load()
-            
             # Standard transcribe without diarization
             result = engine.transcribe(audio_file)
-            text = result['text']
+            text = result.get('text', '')
             
         # Format response based on requests
         if response_format == "json":
@@ -1149,7 +966,7 @@ async def openai_transcriptions(
         elif response_format == "verbose_json":
             return {
                 "task": "transcribe",
-                "language": "english", # Zipformer is English/Multilingual? Assuming detected or default
+                "language": "vi", # Moonshine base-vi
                 "duration": result.get('total_ms', 0) / 1000.0,
                 "text": text,
                 "segments": result.get('segments', []),

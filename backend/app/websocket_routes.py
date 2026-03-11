@@ -141,234 +141,172 @@ async def process_audio_chunk(audio_data: bytes, meeting_id: str, diarize: bool 
         return None
 
 
-# Calculate RMS for VAD
+# Moonshine Voice model initialization
 import numpy as np
-def calculate_rms(audio_chunk: bytes) -> float:
-    """Calculate Root Mean Square (RMS) amplitude of audio chunk"""
-    # Assuming 16-bit PCM (2 bytes per sample)
-    if len(audio_chunk) == 0: return 0.0
-    arr = np.frombuffer(audio_chunk, dtype=np.int16)
-    if len(arr) == 0: return 0.0  # Safety check
-    mean_val = np.mean(arr**2)
-    if mean_val <= 0: return 0.0  # Prevent sqrt of negative
-    return np.sqrt(mean_val)
+
+moonshine_model_path = None
+moonshine_model_arch = None
+
+def get_moonshine_model():
+    global moonshine_model_path, moonshine_model_arch
+    if moonshine_model_path is None:
+        try:
+            from moonshine_voice.download import get_model_for_language
+            print("🚀 Loading Vietnamese Moonshine model for streaming...")
+            moonshine_model_path, moonshine_model_arch = get_model_for_language("vi")
+        except Exception as e:
+            print(f"❌ Failed to load Moonshine model: {e}")
+            import traceback
+            traceback.print_exc()
+    return moonshine_model_path, moonshine_model_arch
 
 @router.websocket("/ws/audio/{meeting_id}")
 async def websocket_audio_endpoint(websocket: WebSocket, meeting_id: str):
     """
-    WebSocket endpoint with VAD-triggered Live Transcription.
+    WebSocket endpoint with Real-Time Streaming (Moonshine C++ Engine).
     """
     await manager.connect(websocket, meeting_id)
     
     # Configuration
     SAMPLE_RATE = 16000
-    BYTES_PER_SAMPLE = 2 # 16-bit
-    
-    # VAD Constants - TUNED for continuous speech
-    SILENCE_THRESHOLD = 300
-    SILENCE_DURATION = 2.0
-    MIN_PHRASE_DURATION = 2.0
-    MAX_PHRASE_DURATION = 20.0 
-    COOLDOWN_DURATION = 0.5
     
     # Buffers & State
     final_buffer = bytearray()      # Full meeting audio (for DB save on stop)
-    phrase_buffer = bytearray()     # Current active phrase (for live transcript)
-    
-    silence_start_time = None
-    last_process_time = datetime.now()
-    is_processing = False  # Flag to prevent duplicate processing
     
     try:
-        while True:
-            data = await websocket.receive()
+        from moonshine_voice.transcriber import Transcriber, TranscriptEventListener, TranscriptLine
+        
+        model_path, model_arch = get_moonshine_model()
+        if not model_path:
+            raise ValueError("Moonshine model not loaded")
             
-            if 'text' in data:
-                 message = json.loads(data['text'])
-                 msg_type = message.get('type')
-                 print(f"📩 Received TEXT message: {msg_type}")
-                 
-                 if msg_type == 'stop':
-                     # Process any remaining phrase
-                     if len(phrase_buffer) > 0:
-                         asyncio.create_task(process_live_phrase(bytes(phrase_buffer), meeting_id))
-                     
-                     # Final flush (FULL PIPELINE)
-                     if len(final_buffer) > 0:
-                         await manager.broadcast(meeting_id, {'type': 'status', 'status': 'processing'})
-                         asyncio.create_task(process_full_meeting_and_broadcast(bytes(final_buffer), meeting_id))
-                     
-                     await manager.broadcast(meeting_id, {'type': 'status', 'status': 'stopped'})
-                     break
+        transcriber = Transcriber(
+            model_path=model_path,
+            model_arch=model_arch,
+            update_interval=1.0, # Wait longer (1s) before pushing text to allow AI to gain enough context for accurate translation
+            options={
+                "max_tokens_per_second": "13.0",    # Hard limit to avoid hallucination loops
+                "identify_speakers": "false",
+                "vad_threshold": "0.1",             # Extremely sensitive: capture even soft speech to avoid truncating words
+                "vad_max_segment_duration": "30.0", # Allow very long sentences (up to 30s) to gather context
+            }
+        )
+        
+        loop = asyncio.get_running_loop()
+        last_text = ""
+        
+        class LiveTranscriptListener(TranscriptEventListener):
+            def broadcast_line(self, line: TranscriptLine, is_completed: bool):
+                text = line.text.strip()
+                nonlocal last_text
+                
+                # Filter out pure noise/empty lines
+                if len(text) < 2 and not text.isdigit(): return
+                
+                # Apply Regex to collapse infinite repetition (e.g., "Hẹn gặp lại Hẹn gặp lại")
+                import re
+                text = re.sub(r'(.{6,}?)(?:\s*\1){2,}', r'\1', text)
+                
+                # Comprehensive Hallucination Filter 
+                t_lower = text.lower()
+                blacklist = ["ừ", "à", "ậm", "ờ", "um", "uh", "ah", "oh", "a", "o", "hử", "ử", "hử hử", "ử ử"]
+                hallu_keywords = [
+                    "ghiền mì", "youtube", "subscribe", "la la school",
+                    "đăng ký kênh", "để không bỏ lỡ", "những video hấp dẫn",
+                    "bạn đã xem video", "cảm ơn các bạn", "người dịch:", 
+                    "subtitles by", "amara.org", "viết phụ đề bởi", "like và share",
+                    "hẹn gặp lại", "hẹn gặp lạ"
+                ]
+                
+                if t_lower in blacklist: return
+                if any(hk in t_lower for hk in hallu_keywords): return
+                if len(set(t_lower)) == 1 and len(t_lower) > 3: return
+                
+                # Check if it didn't change (to avoid spamming websocket)
+                if text == last_text and not is_completed:
+                    return
+                last_text = text
+                
+                # Prepare speaker name
+                speaker_name = f'SPEAKER_{line.speaker_index:02d}' if line.has_speaker_id else 'Unknown'
 
-            elif 'bytes' in data:
-                audio_chunk = data['bytes']
-                result = None
+                # Thread-safe broadcast
+                asyncio.run_coroutine_threadsafe(
+                    manager.broadcast(meeting_id, {
+                        'type': 'live_transcript',
+                        'transcript': text,
+                        'speaker': speaker_name,
+                        'timestamp': datetime.now().isoformat(),
+                        'is_completed': is_completed
+                    }),
+                    loop
+                )
+
+            def on_line_text_changed(self, event):
+                self.broadcast_line(event.line, False)
+
+            def on_line_completed(self, event):
+                self.broadcast_line(event.line, True)
+                nonlocal last_text
+                last_text = ""
+
+        # Add listener and start Transcriber background thread
+        transcriber.add_listener(LiveTranscriptListener())
+        transcriber.start()
+
+        try:
+            while True:
+                data = await websocket.receive()
                 
-                # 1. Feed buffers
-                final_buffer.extend(audio_chunk)
-                phrase_buffer.extend(audio_chunk)
-                
-                # 2. VAD & Trigger Logic
-                rms = calculate_rms(audio_chunk)
-                now = datetime.now()
-                
-                is_silence = rms < SILENCE_THRESHOLD
-                
-                # Calculate durations
-                phrase_duration = len(phrase_buffer) / (SAMPLE_RATE * BYTES_PER_SAMPLE)
-                time_since_last_process = (now - last_process_time).total_seconds()
-                
-                if is_silence:
-                    if silence_start_time is None:
-                        silence_start_time = now
-                    else:
-                        silence_duration = (now - silence_start_time).total_seconds()
-                        
-                        # Trigger condition: Sufficient silence AND enough audio AND not in cooldown
-                        should_trigger = (
-                            silence_duration > SILENCE_DURATION and 
-                            phrase_duration > MIN_PHRASE_DURATION and
-                            time_since_last_process > COOLDOWN_DURATION and
-                            not is_processing
-                        )
-                        
-                        if should_trigger:
-                             print(f"🎤 VAD Trigger: Silence={silence_duration:.2f}s, Phrase={phrase_duration:.2f}s")
-                             
-                             # Set flag to prevent duplicate
-                             is_processing = True
-                             
-                             # Copy buffer to process
-                             audio_to_process = bytes(phrase_buffer)
-                             
-                             # --- OVERLAP STRATEGY ---
-                             # Keep last 1.0s of audio (usually silence) as context for next phrase
-                             # This fixes "missing start of next sentence" by giving Whisper context
-                             overlap_duration = 1.0 
-                             overlap_bytes = int(SAMPLE_RATE * BYTES_PER_SAMPLE * overlap_duration)
-                             
-                             if len(phrase_buffer) > overlap_bytes:
-                                 phrase_buffer = phrase_buffer[-overlap_bytes:]
-                             else:
-                                 # If buffer is short (unlikely due to duration check), keep all
-                                 # But actually we want to reset if it's just silence? 
-                                 # No, context is good.
-                                 pass 
-                                 
-                             # Reset only timing, keep phrase_buffer with overlap
-                             silence_start_time = None
-                             last_process_time = now
-                             
-                             # Async Process with callback to reset flag
-                             async def process_with_reset():
-                                 await process_live_phrase(audio_to_process, meeting_id)
-                                 nonlocal is_processing
-                                 is_processing = False
-                             
-                             asyncio.create_task(process_with_reset())
-                             
-                else:
-                    # Voice detected, reset silence timer
-                    silence_start_time = None
-                    
-                # 3. Force Trigger (Safety Net) - only if enough time has passed
-                if phrase_duration > MAX_PHRASE_DURATION and time_since_last_process > COOLDOWN_DURATION and not is_processing:
-                     print(f"⏰ Force Trigger: Max phrase duration reached ({phrase_duration:.2f}s)")
-                     is_processing = True
-                     audio_to_process = bytes(phrase_buffer)
+                if 'text' in data:
+                     message = json.loads(data['text'])
+                     msg_type = message.get('type')
+                     print(f"📩 Received TEXT message: {msg_type}")
                      
-                     # Keep overlap even on force trigger to avoid cutting words
-                     overlap_bytes = int(SAMPLE_RATE * BYTES_PER_SAMPLE * 1.0)
-                     if len(phrase_buffer) > overlap_bytes:
-                         phrase_buffer = phrase_buffer[-overlap_bytes:]
-                     else:
-                         phrase_buffer = bytearray() # Should not happen on Max Duration
+                     if msg_type == 'stop':
+                         # Final flush (FULL PIPELINE)
+                         if len(final_buffer) > 0:
+                             await manager.broadcast(meeting_id, {'type': 'status', 'status': 'processing'})
+                             asyncio.create_task(process_full_meeting_and_broadcast(bytes(final_buffer), meeting_id))
                          
-                     silence_start_time = None
-                     last_process_time = now
-                     
-                     async def process_with_reset():
-                         await process_live_phrase(audio_to_process, meeting_id)
-                         nonlocal is_processing
-                         is_processing = False
-                     
-                     asyncio.create_task(process_with_reset())
+                         await manager.broadcast(meeting_id, {'type': 'status', 'status': 'stopped'})
+                         break
 
-    except WebSocketDisconnect:
-        print(f"🔌 WebSocket disconnected for meeting: {meeting_id}")
-        manager.disconnect(websocket, meeting_id)
+                elif 'bytes' in data:
+                    audio_chunk = data['bytes']
+                    
+                    # 1. Feed final buffer
+                    final_buffer.extend(audio_chunk)
+                    
+                    # 2. Feed stream to Transcriber C++ Engine
+                    if len(audio_chunk) > 0:
+                        # Convert Int16 PCM to Float32 [-1.0, 1.0] for streaming ASR
+                        pcm_array = np.frombuffer(audio_chunk, dtype=np.int16)
+                        float_array = pcm_array.astype(np.float32) / 32768.0
+                        
+                        # Apply static gain instead of variable AGC to avoid gain pumping and distortion
+                        float_array = float_array * 4.0
+                        float_array = np.clip(float_array, -1.0, 1.0)
+                            
+                        transcriber.add_audio(float_array, SAMPLE_RATE)
+
+        except WebSocketDisconnect:
+            print(f"🔌 WebSocket disconnected for meeting: {meeting_id}")
+        except Exception as e:
+            print(f"❌ WebSocket loop error: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            print(f"🛑 Stopping Live Transcriber for {meeting_id}")
+            transcriber.stop()
+            manager.disconnect(websocket, meeting_id)
+            print(f"🏁 WebSocket loop exited. Final Buffer Size: {len(final_buffer)} bytes")
+
     except Exception as e:
-        print(f"❌ WebSocket error: {e}")
+        print(f"❌ WebSocket Transcriber init error: {e}")
         import traceback
         traceback.print_exc()
         manager.disconnect(websocket, meeting_id)
-        
-    finally:
-        print(f"🏁 WebSocket loop exited. Final Buffer Size: {len(final_buffer)} bytes")
-
-async def process_live_phrase(audio_data: bytes, meeting_id: str):
-    """
-    Process a specific phrase for live display.
-    Broadcasting 'live_transcript' event.
-    """
-    # WRAP IN WAV HEADER (Critical fix for raw PCM)
-    wav_data = create_wav_bytes(audio_data)
-    
-    # Disable diarization for live transcripts as requested
-    result = await process_audio_chunk(wav_data, meeting_id, diarize=False)
-    
-    if result and result.get('transcript'):
-        text = result['transcript'].strip()
-        
-        # --- TRASH FILTER for Live Transcripts ---
-        text_upper = text.upper()
-        blacklist = ["Ừ", "À", "ẬM", "Ờ", "UM", "UH", "AH", "OH", "A", "O", "HỬ", "Ử"]
-        
-        is_trash = False
-        if text_upper in blacklist:
-            is_trash = True
-        elif len(text) < 2 and not text.isdigit():
-            is_trash = True
-        elif len(set(text_upper)) == 1 and len(text_upper) > 3:  # Repeated char
-            is_trash = True
-        elif text_upper in ["HỬ HỬ", "Ử Ử", "ỬA", "ỬM"]:  # Common Vietnamese fillers
-            is_trash = True
-            
-        if is_trash:
-            print(f"🚮 Filtered trash from live: '{text}'")
-            return  # Don't broadcast
-        # -------------------
-        
-        # Broadcast special "live_transcript" type
-        await manager.broadcast(meeting_id, {
-            'type': 'live_transcript',
-            'transcript': text,
-            'speaker': result.get('speaker', 'Unknown'),
-            'timestamp': datetime.now().isoformat()
-        })
-
-
-async def process_preview_broadcast(audio_data: bytes, meeting_id: str):
-    """
-    Process sliding window for ephemeral preview.
-    """
-    # Diarize=False for speed
-    result = await process_audio_chunk(audio_data, meeting_id, diarize=False)
-    
-    # If result is empty, we send empty string to "clear" the preview
-    # or if silence, we just send whatever we got.
-    transcript = result.get('text', '') if result else ''
-    
-    # Only broadcast if we have a result (even empty one could be useful to clear?)
-    # But usually we only want to show text.
-    # Let's broadcast updates.
-    if result:
-        await manager.broadcast(meeting_id, {
-            'type': 'preview',
-            'transcript': transcript,
-            'timestamp': datetime.now().isoformat()
-        })
 
 async def process_final_and_broadcast(audio_data: bytes, meeting_id: str):
     """
