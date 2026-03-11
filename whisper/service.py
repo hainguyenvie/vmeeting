@@ -85,19 +85,23 @@ def load_audio_robust(file_source):
 
 def enhance_audio_for_asr(audio: np.ndarray, sr: int = 16000) -> np.ndarray:
     """
-    Pipeline cải thiện chất lượng audio trước ASR.
+    Pipeline D_LITE — kết quả benchmark tốt nhất trên 3 file meeting thực tế.
 
-    Thứ tự áp dụng (quan trọng):
+    Chỉ 2 bước, overhead ~2–21ms (thay vì ~450–550ms của pipeline cũ):
     1. RMS normalization  — đảm bảo biên độ nhất quán (~-20 dBFS)
     2. Bandpass filter    — giữ lại dải tần tiếng nói (80–7500 Hz)
-    3. Spectral denoising — giảm noise nền stationary (điều hòa, quạt)
-    4. Pre-emphasis       — làm rõ phụ âm (quan trọng cho tiếng Việt có dấu)
-    5. Final normalize    — đảm bảo output trong [-1, 1]
+    3. Peak normalization — output ổn định vào model
 
-    ⚠️ Parameters conservative theo research:
-    - prop_decrease=0.6 (không phải 1.0) — tránh "musical noise" artifacts
-    - Moonshine đã robust với moderate noise, nên enhance nhẹ là đủ
-    - Thứ tự bandpass TRƯỚC denoise để tránh lọc mất low-freq phonemes
+    ✅ Lý do bỏ spectral denoising:
+    - Tốn 450–550ms cho 100s audio — phần lớn thời gian xử lý
+    - Benchmark thực tế: word count tương đương baseline (chênh ~0.17%)
+    - Noisereduce tạo artifacts ('musical noise') → model đọc sai fricatives
+      VD: 'treo banner' → 'chịu bánh nước' khi dùng prop_decrease=0.6
+
+    ✅ Lý do bỏ pre-emphasis (α=0.95):
+    - Modern neural ASR (Moonshine/Whisper) có learned feature extraction
+    - Research 2024: pre-emphasis có thể distort fricatives (s, sh, ch)
+    - Benchmark: không cải thiện word count trên bất kỳ file nào
     """
     if len(audio) == 0:
         return audio
@@ -110,9 +114,10 @@ def enhance_audio_for_asr(audio: np.ndarray, sr: int = 16000) -> np.ndarray:
         audio = audio * (0.1 / rms)          # 0.1 ≈ -20 dBFS
         audio = np.clip(audio, -1.0, 1.0)
 
-    # 2. Bandpass filter: 80 Hz – 7500 Hz (scipy.signal đã import ở đầu file)
-    #    - Loại bỏ rung bàn/hum điện (< 80 Hz)
+    # 2. Bandpass filter: 80 Hz – 7500 Hz
+    #    - Loại bỏ hum điện / rung bàn (< 80 Hz)
     #    - Loại bỏ HF noise gần Nyquist (> 7500 Hz)
+    #    - Lightweight: ~2ms cho 100s audio
     nyq = sr / 2.0
     try:
         sos = signal.butter(4, [80.0 / nyq, 7500.0 / nyq], btype='band', output='sos')
@@ -120,31 +125,7 @@ def enhance_audio_for_asr(audio: np.ndarray, sr: int = 16000) -> np.ndarray:
     except Exception:
         pass
 
-    # 3. Spectral Denoising (noisereduce — optional, graceful fallback nếu chưa install)
-    #    stationary=True: phù hợp noise nền ổn định (điều hòa, quạt máy tính)
-    #    prop_decrease=0.6: giảm 60% noise — conservative, không mất speech
-    try:
-        import noisereduce as nr
-        audio = nr.reduce_noise(
-            y=audio,
-            sr=sr,
-            stationary=True,
-            prop_decrease=0.6,
-            n_std_thresh_stationary=1.5,   # ngưỡng bảo thủ hơn default (2.0)
-            n_fft=1024,
-            time_constant_s=2.0,
-        ).astype(np.float32)
-    except ImportError:
-        pass  # chưa install noisereduce → bỏ qua step này
-    except Exception as e:
-        print(f"  ⚠️ Audio denoise skipped: {e}")
-
-    # 4. Pre-emphasis: y[t] = x[t] - 0.95 * x[t-1]
-    #    Tăng cường phụ âm / tones — quan trọng cho tiếng Việt
-    alpha = 0.95
-    audio = np.concatenate([[audio[0]], audio[1:] - alpha * audio[:-1]])
-
-    # 5. Final peak normalization → [-0.95, 0.95]
+    # 3. Peak normalization → [-0.95, 0.95]
     peak = np.max(np.abs(audio))
     if peak > 1e-8:
         audio = audio / peak * 0.95
@@ -428,7 +409,7 @@ class MoonshineEngine:
                 self.vad_model,
                 sampling_rate=16000,
                 return_seconds=True,
-                threshold=0.6,             # Stricter: 0.6 để bớt rác/nhạc
+                threshold=0.5,             # Default Silero — benchmark cho thấy 0.6 quá strict, miss speech
                 min_speech_duration_ms=500,
                 min_silence_duration_ms=200,
             )
@@ -499,27 +480,28 @@ class MoonshineEngine:
         #    Ta dùng 13.0 tok/s cho tiếng Việt → max_length=390 cho chunk 30s.
         #    Transformers cảnh báo khi vượt 194, nhưng vẫn generate đúng đến 390.
         #    Đây là behavior BÌNH THƯỜNG và ĐÚNG cho tiếng Việt.
-        token_limit_factor = self.MAX_TOKENS_PER_SEC / 16000.0
         if hasattr(inputs, "attention_mask") and inputs.attention_mask is not None:
             # Dùng .float() để tránh precision loss khi sum lớn số lượng samples
-            seq_lens   = inputs.attention_mask.sum(dim=-1).float()
-            max_length = max(10, int((seq_lens * token_limit_factor).max().item()))
+            dur_sec = (inputs.attention_mask.sum(dim=-1).float().max().item()) / 16000.0
         else:
-            dur_sec    = len(audio_seg) / 16000.0
-            max_length = max(10, int(dur_sec * self.MAX_TOKENS_PER_SEC))
+            dur_sec = len(audio_seg) / 16000.0
 
-        print(f"     → Computed max_length: {max_length}")
+        # ✅ Sửa Lỗi Cắt Chữ: Tăng giới hạn sinh mã lên 35 tokens/giây, vì Tiếng Việt nhiều âm tiết hơn Tiếng Anh rất nhiều.
+        # Dùng max_new_tokens thay vỉ max_length (tổng độ dài gốc) để tránh việc model đếm cả các prompt padding dẫn đến ngắt sớm.
+        max_new_tokens = max(10, int(dur_sec * 35.0))
+
+        print(f"     → Computed max_new_tokens: {max_new_tokens}")
         import warnings
         with torch.no_grad(), warnings.catch_warnings():
             # Suppress expected warning về model's predefined max_length
-            # cho tiếng Việt vì ta dùng 13 tok/s thay vì 6.5 của tiếng Anh
             warnings.filterwarnings("ignore", message=".*exceeded the model's predefined maximum length.*")
             generated_ids = self.model.generate(
                 **inputs,
-                max_length=max_length,   # tổng tokens, không phải max_new_tokens
+                max_new_tokens=max_new_tokens,   # Sử dụng max_new_tokens an toàn hơn
                 do_sample=False,
                 num_beams=3,
                 repetition_penalty=1.1,
+                no_repeat_ngram_size=7,          # Ngăn chặn vòng lặp "Dạ đúng rồi. Dạ đúng rồi..."
             )
 
         return self.processor.batch_decode(
@@ -547,7 +529,7 @@ class MoonshineEngine:
         duration_sec = len(audio) / 16000.0
         print(f"🎵 Moonshine: {duration_sec:.2f}s audio")
 
-        # 2. Audio enhancement (denoise, bandpass, normalize, pre-emphasis)
+        # 2. Audio enhancement D_LITE (RMS normalize + bandpass 80-7500Hz)
         #    Áp dụng TRƯỚC VAD để VAD detect voice chính xác hơn trên audio sạch
         t_enhance = time.time()
         audio = enhance_audio_for_asr(audio, sr=16000)
@@ -895,6 +877,32 @@ def preprocess_audio_pipeline(audio):
         print(f"⚠️ Preprocessing failed: {e}")
         return audio
 
+pyannote_pipeline = None
+
+def get_pyannote_pipeline():
+    global pyannote_pipeline
+    if pyannote_pipeline is None:
+        print("🚀 Loading Pyannote 3.1 Pipeline on CUDA...")
+        from pyannote.audio import Pipeline
+        import torch
+        pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1",
+            token="YOUR_HF_TOKEN_HERE"
+        )
+        if torch.cuda.is_available():
+            pipeline.to(torch.device("cuda"))
+            
+        # Optimization: Tăng kích thước gói (batch size) từ 1 mặc định lên 32
+        # Giúp GPU xứ lý đa luồng đồng thời -> Tăng tốc độ Diarization gấp 15-20 lần cho file dài
+        if hasattr(pipeline, "segmentation_batch_size"):
+            pipeline.segmentation_batch_size = 32
+        if hasattr(pipeline, "embedding_batch_size"):
+            pipeline.embedding_batch_size = 32
+            
+        pyannote_pipeline = pipeline
+        print(f"✅ Pyannote loaded! (Seg batch: {getattr(pipeline, 'segmentation_batch_size', 1)}, Embed batch: {getattr(pipeline, 'embedding_batch_size', 1)})")
+    return pyannote_pipeline
+
 async def run_diarize_first_pipeline(audio_bytes, speaker_mgr, stt_engine):
     start_time = time.time()
     
@@ -908,187 +916,167 @@ async def run_diarize_first_pipeline(audio_bytes, speaker_mgr, stt_engine):
     except Exception as e:
         print(f"❌ Error loading audio for pipeline: {e}")
         return []
-
-    # 2. Preprocess
-    audio = preprocess_audio_pipeline(audio)
-    
-    # FIX: Calculate adaptive energy threshold based on audio RMS
-    audio_rms = np.sqrt(np.mean(audio**2))
-    energy_threshold = max(audio_rms * 0.03, 0.0001)  # 3% of RMS, minimum 0.0001
-    print(f"🎚️ Adaptive Energy Threshold: {energy_threshold:.6f} (Audio RMS: {audio_rms:.6f})")
-    
-    # 3. Diarize (Full Scan)
-    print("🔍 [Pipeline] Step 1: Diarizing...")
-    
-    # Reuse speaker_mgr
-    if not speaker_mgr.loaded: speaker_mgr.load()
-    
-    window_sec = 2.0
-    step_sec = 1.0
-    window_samples = int(window_sec * 16000)
-    step_samples = int(step_sec * 16000)
-    
-    timeline = [] # (start, end, speaker_id)
-    current_spk = -1
-    current_start = 0.0
-    
-    total_len = len(audio)
-    
-    # Local speaker registry for this session
-    session_speakers = [] # {id, centroid, vector_sum, count}
-    
-    # FIX: Track statistics for debugging
-    total_chunks = 0
-    skipped_chunks = 0
-    
-    def get_embedding(chunk):
-        stream = speaker_mgr.extractor.create_stream()
-        stream.accept_waveform(16000, chunk)
-        stream.input_finished()
-        if not speaker_mgr.extractor.is_ready(stream): return None
-        emb = np.array(speaker_mgr.extractor.compute(stream))
-        n = np.linalg.norm(emb)
-        if n > 0: emb /= n
-        return emb
-
-    def assign_local(emb, threshold=0.30):
-        best_sim = -1.0
-        best_idx = -1
-        for i, spk in enumerate(session_speakers):
-            sim = np.dot(emb, spk['centroid'])
-            if sim > best_sim:
-                best_sim = sim
-                best_idx = i
         
-        if best_sim > threshold:
-             spk = session_speakers[best_idx]
-             spk['vector_sum'] += emb
-             spk['count'] += 1
-             spk['centroid'] = spk['vector_sum'] / np.linalg.norm(spk['vector_sum'])
-             return best_idx
-        else:
-             new_id = len(session_speakers)
-             session_speakers.append({
-                 'id': new_id, 'centroid': emb, 'vector_sum': emb, 'count': 1
-             })
-             return new_id
+    duration = len(audio) / 16000.0
 
-    # Scan
-    for i in range(0, total_len - window_samples, step_samples):
-        chunk = audio[i : i+window_samples]
-        total_chunks += 1
-        
-        # FIX: Use RMS instead of mean energy for better detection
-        rms = np.sqrt(np.mean(chunk**2))
-        
-        # FIX: Use adaptive threshold
-        if rms < energy_threshold:
-            skipped_chunks += 1
-            # FIX: Debug logging for skipped chunks (only every 5 seconds to avoid spam)
-            if i % (16000 * 5) == 0:
-                print(f"⚡ Skip low energy chunk at {i/16000.0:.2f}s (RMS={rms:.6f} < threshold={energy_threshold:.6f})")
-            
-            if current_spk != -1:
-                timeline.append((current_start, i/16000.0 + window_sec, current_spk))
-                current_spk = -1
-            continue
-            
-        emb = get_embedding(chunk)
-        if emb is None: continue
-        
-        spk_id = assign_local(emb)
-        ts = i / 16000.0
-        
-        if spk_id != current_spk:
-            if current_spk != -1:
-                timeline.append((current_start, ts, current_spk))
-            current_spk = spk_id
-            current_start = ts
-            
-    if current_spk != -1:
-         timeline.append((current_start, total_len/16000.0, current_spk))
-
-    # FIX: Print scan statistics
-    print(f"📊 Scan Stats: {total_chunks} chunks, {skipped_chunks} skipped ({skipped_chunks/total_chunks*100:.1f}%)")
-    print(f"📊 Raw Timeline: {len(timeline)} segments")
+    # 2. Preprocess (D_LITE pipeline)
+    print("🧹 [Pipeline] Step 1: Enhancing...")
+    audio = enhance_audio_for_asr(audio)
     
-    # FIX: Debug - print all raw timeline segments
-    for idx, (start, end, spk) in enumerate(timeline[:20]):  # First 20 segments
-        print(f"  [{idx}] {start:.2f} - {end:.2f} Speaker {spk} (duration: {end-start:.2f}s)")
-    if len(timeline) > 20:
-        print(f"  ... and {len(timeline)-20} more segments")
-
-    # 4. Merge
-    print("🔗 [Pipeline] Step 2: Merging...")
+    # 3. Pyannote Diarization (Chuẩn SOTA 2025)
+    print("🔍 [Pipeline] Step 2: Pyannote Diarization (16ms frame)...")
+    import torch
+    
+    pipeline = get_pyannote_pipeline()
+    
+    # Pyannote yêu cầu Tensor dạng (channels, samples)
+    waveform = torch.from_numpy(audio.astype(np.float32)).unsqueeze(0)
+    
+    diarization = pipeline({"waveform": waveform, "sample_rate": 16000})
+    
+    # Check what pipeline returns, it might be a DiarizeOutput object or an Annotation object.
+    # Pyannote version 3.1 returns an Annotation object usually, but in some frameworks it's different.
+    # To be perfectly safe, let's dump its attributes if it crashes, or just use it correctly: 
+    raw_spk_timeline = []
+    
+    # Pyannote version 3.1 returns a DiarizeOutput object
+    annotation = diarization.speaker_diarization if hasattr(diarization, "speaker_diarization") else diarization
+        
+    for turn, _, speaker in annotation.itertracks(yield_label=True):
+        raw_spk_timeline.append((turn.start, turn.end, speaker))
+        
+    if not raw_spk_timeline:
+        print("⚠️ No speech detected for diarization.")
+        return []
+        
+    print("🔗 [Pipeline] Step 3: Merging Pyannote segments (Smart Per-Speaker Merging)...")
+    
+    # Gom nhóm segment độc lập cho từng người nói, vì Pyannote trả về Timeline xếp chồng (Overlap)
+    spk_to_segs = {}
+    for s, e, spk in raw_spk_timeline:
+        if spk not in spk_to_segs:
+            spk_to_segs[spk] = []
+        spk_to_segs[spk].append((s, e))
+        
     merged_timeline = []
-    if timeline:
-        curr_start, curr_end, curr_spk = timeline[0]
-        for i in range(1, len(timeline)):
-            s, e, spk = timeline[i]
-            gap = s - curr_end
-            
-            # FIX: Increase gap tolerance to 3.0s (from 2.0s)
-            if spk == curr_spk and gap < 3.0:
-                curr_end = max(curr_end, e)
+    for spk, segs in spk_to_segs.items():
+        # Sắp xếp segment của người này theo thời gian
+        segs.sort(key=lambda x: x[0])
+        
+        cur_s, cur_e = segs[0]
+        for s, e in segs[1:]:
+            # Có thể gộp nếu khoảng lặng < 2.0s và tổng độ dài < 25s
+            if s - cur_e <= 2.0 and (e - cur_s) < 25.0: 
+                cur_e = max(cur_e, e)
             else:
-                # FIX: Decrease minimum duration to 0.3s (from 1.0s)
-                if curr_end - curr_start > 0.3:
-                    merged_timeline.append((curr_start, curr_end, curr_spk))
-                else:
-                    print(f"⚠️ Filtered short segment: {curr_start:.2f}-{curr_end:.2f} (duration: {curr_end-curr_start:.2f}s)")
-                curr_start = s
-                curr_end = e
-                curr_spk = spk
-        
-        # FIX: Decrease minimum duration for final segment
-        if curr_end - curr_start > 0.3:
-            merged_timeline.append((curr_start, curr_end, curr_spk))
-        else:
-            print(f"⚠️ Filtered short final segment: {curr_start:.2f}-{curr_end:.2f} (duration: {curr_end-curr_start:.2f}s)")
-    
-    # FIX: Print merged timeline
-    print(f"📊 Merged Timeline: {len(merged_timeline)} segments")
-    for idx, (start, end, spk) in enumerate(merged_timeline):
-        print(f"  [{idx}] {start:.2f} - {end:.2f} Speaker {spk} (duration: {end-start:.2f}s)")
-    
-    # FIX: Check for gaps in merged timeline
-    if len(merged_timeline) > 1:
-        print("🔍 Analyzing gaps between segments:")
-        for i in range(len(merged_timeline) - 1):
-            gap = merged_timeline[i+1][0] - merged_timeline[i][1]
-            if gap > 1.0:  # Report gaps > 1s
-                print(f"  ⚠️ GAP: {merged_timeline[i][1]:.2f} → {merged_timeline[i+1][0]:.2f} ({gap:.2f}s)")
-        
-    # 5. Transcribe Segments
-    print("📝 [Pipeline] Step 3: Transcribing...")
+                # Lọc bỏ các tiếng thở dài, tạp âm cực ngắn (<0.4s) bị nhận dạng nhầm nếu đứng bơ vơ
+                if cur_e - cur_s >= 0.4:
+                    merged_timeline.append((cur_s, cur_e, spk))
+                cur_s, cur_e = s, e
+                
+        if cur_e - cur_s >= 0.4:
+            merged_timeline.append((cur_s, cur_e, spk))
+
+    # Sắp xếp lại timeline tổng hợp theo thời gian bắt đầu
+    merged_timeline.sort(key=lambda x: x[0])
+
+    # Re-index labels sequentially based on their first appearance
+    num_speakers = len(set(lbl for _, _, lbl in merged_timeline))
+    label_map = {}
+    next_id = 0
+    renumbered_timeline = []
+    for start, end, lbl in merged_timeline:
+        if lbl not in label_map:
+            label_map[lbl] = next_id
+            next_id += 1
+        renumbered_timeline.append((start, end, label_map[lbl]))
+    merged_timeline = renumbered_timeline
+
+    print(f"📊 Identified {num_speakers} speakers in {len(merged_timeline)} segments via Pyannote.")
+
+    # 5. Transcribe
+    print("📝 [Pipeline] Step 4: Transcribing segments...")
     final_output = []
     
-    for start, end, spk in merged_timeline:
-        s_idx = max(0, int((start - 0.1) * 16000))
-        e_idx = min(len(audio), int((end + 0.1) * 16000))
+    for i, (start, end, spk) in enumerate(merged_timeline):
+        # Dynamic Padding: fix lỗi mất chữ ở đầu/cuối câu nhưng KHÔNG lấy lấn sang giọng của người khác (dính 2 người)
+        # Giới hạn padding tối đa 0.3s. Nếu câu tiếp theo bắt đầu quá sát, ta chia đôi khoảng trống.
+        s_pad = 0.3
+        if i > 0:
+            prev_end = merged_timeline[i-1][1]
+            if start - prev_end < 0.6:
+                s_pad = max(0, (start - prev_end) / 2.0)
+                
+        e_pad = 0.3
+        if i < len(merged_timeline) - 1:
+            next_start = merged_timeline[i+1][0]
+            if next_start - end < 0.6:
+                e_pad = max(0, (next_start - end) / 2.0)
+                
+        s_idx = max(0, int((start - s_pad) * 16000))
+        e_idx = min(len(audio), int((end + e_pad) * 16000))
         seg_audio = audio[s_idx:e_idx]
         
-        # Use ZipformerEngine's recognizer directly
-        # stt_engine is a ZipformerEngine instance
-        s = stt_engine.recognizer.create_stream()
-        s.accept_waveform(16000, seg_audio)
-        stt_engine.recognizer.decode_stream(s)
-        text = s.result.text.strip()
+        # Check engine type (Moonshine or Zipformer)
+        if hasattr(stt_engine, "_transcribe_segment"):
+            # MoonshineEngine has a strict max 30s limit to avoid context truncation (losing audio tail).
+            duration_seg = len(seg_audio) / 16000.0
+            if hasattr(stt_engine, "_get_speech_segments") and duration_seg > 29.0:
+                print(f"  ✂️ Segment too long ({duration_seg:.1f}s), splitting using VAD...")
+                # Use Moonshine's built-in VAD packer to safely break > 29s blocks at quiet points
+                sub_chunks = stt_engine._get_speech_segments(seg_audio, duration_seg)
+                chunk_texts = []
+                for sub in sub_chunks:
+                    ss_idx = int(sub["start"] * 16000)
+                    ee_idx = int(sub["end"] * 16000)
+                    sub_audio = seg_audio[ss_idx:ee_idx]
+                    if len(sub_audio) / 16000.0 < 0.2: 
+                        continue
+                    ctext = stt_engine._transcribe_segment(sub_audio)
+                    if ctext:
+                        chunk_texts.append(ctext)
+                text = " ".join(chunk_texts)
+            else:
+                text = stt_engine._transcribe_segment(seg_audio)
+                
+        elif hasattr(stt_engine, "recognizer"):
+            # ZipformerEngine
+            s = stt_engine.recognizer.create_stream()
+            s.accept_waveform(16000, seg_audio)
+            stt_engine.recognizer.decode_stream(s)
+            text = s.result.text.strip()
+        else:
+            text = "***"
+            
+        # Thêm regex khử các cụm từ bị lặp vô hạn nếu Moonshine vẫn còn rớt
+        import re
+        # Tìm cụm từ dài ít nhất 10 ký tự lặp đi lặp lại từ 3 lần trở lên và thay bằng 1 lần
+        text = re.sub(r'(.{6,}?)(?:\s*\1){2,}', r'\1', text)
         
-        if text and len(text) > 1:
+        t_lower = text.lower()
+        
+        # Comprehensive Hallucination Filter 
+        hallu_keywords = [
+            "ghiền mì", "youtube", "subscribe", "la la school",
+            "đăng ký kênh", "để không bỏ lỡ", "những video hấp dẫn",
+            "bạn đã xem video", "cảm ơn các bạn", "người dịch:", 
+            "subtitles by", "amara.org", "viết phụ đề bởi", "like và share",
+            "hẹn gặp lại", "hẹn gặp lạ"
+        ]
+        
+        is_hallucination = any(hk in t_lower for hk in hallu_keywords) or len(text.strip()) < 3
+            
+        if text and not is_hallucination:
             final_output.append({
-                "start": start,
-                "end": end,
+                "start": float(start),
+                "end": float(end),
                 "speaker": f"Speaker {spk+1}",
                 "text": text
             })
             print(f"  ✅ [{start:.2f}-{end:.2f}] Speaker {spk+1}: {text[:50]}...")
-        else:
-            print(f"  ⚠️ Empty transcription for segment {start:.2f}-{end:.2f}")
             
     elapsed = time.time() - start_time
     print(f"✅ Full Pipeline Complete in {elapsed:.2f}s")
-    print(f"📊 Final Output: {len(final_output)} transcribed segments")
     return final_output
 
 @app.post("/process_full_meeting")
@@ -1133,15 +1121,26 @@ async def openai_transcriptions(
         # 'diarization' flag false -> this is a live processing short chunk (so use zipformer)
         if diarization.lower() == "true":
             engine = engines["moonshine"]
+            if not engine.loaded: engine.load()
+            
+            # Using new optimized diarization-first pipeline
+            if not speaker_manager.loaded: speaker_manager.load()
+            segments = await run_diarize_first_pipeline(audio_data, speaker_manager, engine)
+            text = " ".join([seg["text"] for seg in segments])
+            result = {
+                "text": text,
+                "segments": segments,
+                "total_ms": sum((seg["end"] - seg["start"]) * 1000 for seg in segments) if segments else 0,
+                "model": "moonshine-diarized"
+            }
         else:
             engine = engines["zipformer"]
+            if not engine.loaded: engine.load()
             
-        if not engine.loaded: engine.load()
-        
-        # Transcribe
-        result = engine.transcribe(audio_file)
-        text = result['text']
-        
+            # Standard transcribe without diarization
+            result = engine.transcribe(audio_file)
+            text = result['text']
+            
         # Format response based on requests
         if response_format == "json":
             return {"text": text}

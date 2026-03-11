@@ -421,7 +421,7 @@ async def process_full_meeting_and_broadcast(audio_data: bytes, meeting_id: str,
                 for seg in segments:
                     transcripts.append({
                         "text": seg.get("text", ""),
-                        "speaker": "SPEAKER_00",
+                        "speaker": seg.get("speaker", "SPEAKER_00"),
                         "start": seg.get("start", 0.0),
                         "end": seg.get("end", 0.0)
                     })
