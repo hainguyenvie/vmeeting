@@ -1,0 +1,50 @@
+{
+    "name": "Biên bản họp (Vietnamese)",
+    "description": "Template biên bản họp chuyên nghiệp, tối ưu cho doanh nghiệp Việt Nam. Tự động điền ngày giờ từ hệ thống.",
+    "sections": [
+        {
+            "title": "Thông tin chung",
+            "instruction": "Sử dụng thông tin từ phần 'THÔNG TIN CUỘC HỌP' được cung cấp ở đầu ngữ cảnh (Tiêu đề, Thời gian, Thành phần tham dự). Định dạng: 'Thời gian: [Full Date & Time] | Địa điểm: [Lấy trong transcript, nếu không có thì ghi 'Online/Tại văn phòng'] | Chủ trì: [Tìm trong transcript]'. Ví dụ: 'Thời gian: Thứ Hai, 15/01/2026 14:00 | Địa điểm: Phòng họp A'.",
+            "format": "paragraph"
+        },
+        {
+            "title": "Thành phần tham dự",
+            "instruction": "Liệt kê danh sách người tham gia. Kết hợp thông tin từ 'THÔNG TIN CUỘC HỌP' (danh sách speaker) và nội dung transcript để xác định tên và chức vụ. Nếu có Speaker Label (VD: Speaker 1), hãy cố gắng map với tên thật nếu họ xưng hô trong cuộc họp. Định dạng tablular.",
+            "format": "list",
+            "item_format": "| **Tên/Label** | **Chức vụ/Vai trò** | **Ghi chú** |\n| --- | --- | --- |"
+        },
+        {
+            "title": "Mục tiêu cuộc họp",
+            "instruction": "Tóm tắt ngắn gọn mục đích chính của cuộc họp. Lý do tổ chức cuộc họp này là gì? (Ví dụ: Thảo luận kế hoạch Q1, Giải quyết sự cố X, Review tiến độ dự án Y).",
+            "format": "paragraph"
+        },
+        {
+            "title": "Tóm tắt điều hành (Executive Summary)",
+            "instruction": "Đoạn văn tóm tắt cô đọng nhất về kết quả cuộc họp (dưới 150 từ). Dành cho lãnh đạo đọc nhanh. Nêu bật các quyết định quan trọng nhất và trạng thái chung (Tích cực/Tiêu cực/Cần lưu ý).",
+            "format": "paragraph"
+        },
+        {
+            "title": "Nội dung thảo luận chi tiết",
+            "instruction": "Ghi lại diễn biến cuộc họp theo các chủ đề chính. Đừng ghi theo kiểu 'Anh A nói... Chị B nói...' mà hãy tổng hợp theo vấn đề. Ví dụ: '1. Về vấn đề Marketing: Nhóm đã thảo luận về... Các ý kiến trái chiều gồm...'. Tuy nhiên, nếu có tranh luận gay gắt, hãy ghi rõ quan điểm của các bên.",
+            "format": "paragraph"
+        },
+        {
+            "title": "Các quyết định quan trọng (Decisions)",
+            "instruction": "Liệt kê các quyết định đã được CHỐT. Bắt buộc ghi rõ ai là người chốt (thường là chủ trì).",
+            "format": "list",
+            "item_format": "| **Nội dung quyết định** | **Người phê duyệt/Chốt** | **Tham chiếu** |\n| --- | --- | --- |"
+        },
+        {
+            "title": "Kế hoạch hành động (Action Items)",
+            "instruction": "Danh sách công việc cần làm sau cuộc họp. Cực kỳ quan trọng. Phải trích xuất được: Làm gì? Ai làm? Bao giờ xong? (Deadline). Nếu không có deadline cụ thể trong transcript, ghi 'TBD'.",
+            "format": "list",
+            "item_format": "| **Nhiệm vụ** | **Người phụ trách** | **Deadline** | **Trạng thái** |\n| --- | --- | --- | --- |"
+        },
+        {
+            "title": "Ý kiến tồn đọng/Rủi ro",
+            "instruction": "Các vấn đề chưa giải quyết được, cần thảo luận thêm hoặc các rủi ro được cảnh báo.",
+            "format": "list",
+            "item_format": "| **Vấn đề/Rủi ro** | **Mức độ** | **Ghi chú** |\n| --- | --- | --- |"
+        }
+    ]
+}
